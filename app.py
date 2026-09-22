@@ -24,17 +24,30 @@ st.set_page_config(
 @st.cache_data
 def generate_master_geometry():
     """
-    Generates deterministic master coordinates on a 100x100 grid.
-    Fixed seed guarantees spatial consistency across all experiments.
+    Generates deterministic compact master coordinates in miles.
+    Typical node-to-node distances are about 3-4 miles; no master-table
+    distance can exceed 25 miles.
     """
-    random.seed(42)  # Fixed master seed
-    
-    # 5 Warehouses
-    warehouses = {f"W{i+1}": (round(random.uniform(10, 90), 2), round(random.uniform(10, 90), 2)) for i in range(5)}
-    # 15 DCs
-    dcs = {f"DC{i+1}": (round(random.uniform(5, 95), 2), round(random.uniform(5, 95), 2)) for i in range(15)}
-    # 300 Customers
-    customers = {f"C{i+1}": (round(random.uniform(0, 100), 2), round(random.uniform(0, 100), 2)) for i in range(300)}
+    geometry_seed = random.Random(42)
+    hub_x, hub_y = 50, 50
+    max_radius = 12.4
+
+    def radial_coordinate(min_radius, max_coordinate_radius):
+        angle = geometry_seed.uniform(0, 2 * math.pi)
+        radius = geometry_seed.uniform(min_radius, max_coordinate_radius)
+        return (
+            round(hub_x + radius * math.cos(angle), 2),
+            round(hub_y + radius * math.sin(angle), 2),
+        )
+
+    # A compact local core makes 3-4 mile links predominant. A small bounded
+    # outer group adds geographic variation without permitting a >25-mile link.
+    warehouses = {f"W{i+1}": radial_coordinate(1.9, 2.3) for i in range(5)}
+    dcs = {f"DC{i+1}": radial_coordinate(1.9, 2.3) for i in range(15)}
+    customers = {
+        f"C{i+1}": radial_coordinate(1.9, 2.3) if i < 280 else radial_coordinate(8, max_radius)
+        for i in range(300)
+    }
     
     return warehouses, dcs, customers
 
@@ -54,6 +67,7 @@ def compile_gams_code(
     trans_cost_per_unit,
     warehouse_inventory,
     dc_inventory,
+    core_code=None,
 ):
     master_w, master_dc, master_cust = generate_master_geometry()
     active_w = [f"W{i}" for i in range(1, num_w + 1)]
@@ -67,38 +81,19 @@ def compile_gams_code(
     service_seed = random.Random(202)
     demand_values = {customer: demand_seed.randint(10, 35) for customer in active_cust}
     service_values.update({customer: service_seed.randint(10, 45) for customer in active_cust})
-    distance_rows = {
-        "W1": [0, 22, 13, 21, 37, 21, 29, 18, 35, 11, 33, 24, 27, 13, 39, 22, 12, 27, 19, 36, 30, 29, 38],
-        "D1": [22, 0, 37, 21, 28, 16, 32, 12, 11, 31, 17, 34, 19, 12, 37, 17, 37, 13, 22, 18, 24, 30, 36],
-        "D2": [13, 37, 0, 21, 15, 21, 21, 16, 31, 18, 32, 39, 31, 30, 12, 29, 30, 15, 27, 33, 17, 15, 24],
-        "C1": [21, 21, 21, 0, 22, 18, 39, 30, 32, 27, 17, 31, 20, 36, 34, 34, 11, 17, 36, 11, 35, 20, 22],
-        "C2": [37, 28, 15, 22, 0, 18, 12, 16, 39, 40, 28, 38, 32, 20, 16, 30, 25, 22, 38, 39, 30, 24, 14],
-        "C3": [21, 16, 21, 18, 18, 0, 18, 14, 17, 33, 27, 27, 18, 33, 28, 23, 38, 28, 22, 21, 17, 14, 26],
-        "C4": [29, 32, 21, 39, 12, 18, 0, 25, 12, 34, 11, 37, 13, 14, 30, 15, 35, 31, 23, 29, 12, 22, 22],
-        "C5": [18, 12, 16, 30, 16, 14, 25, 0, 29, 24, 26, 18, 27, 37, 40, 10, 31, 33, 13, 31, 38, 27, 34],
-        "C6": [35, 11, 31, 32, 39, 17, 12, 29, 0, 18, 34, 30, 20, 13, 19, 23, 15, 24, 10, 40, 33, 38, 33],
-        "C7": [11, 31, 18, 27, 40, 33, 34, 24, 18, 0, 18, 26, 34, 15, 26, 39, 13, 37, 30, 19, 36, 30, 26],
-        "C8": [33, 17, 32, 17, 28, 27, 11, 26, 34, 18, 0, 29, 16, 14, 21, 34, 15, 27, 40, 34, 39, 26, 39],
-        "C9": [24, 34, 39, 31, 38, 27, 37, 18, 30, 26, 29, 0, 10, 29, 20, 25, 10, 13, 39, 21, 38, 36, 35],
-        "C10": [27, 19, 31, 20, 32, 18, 13, 27, 20, 34, 16, 10, 0, 19, 17, 11, 17, 38, 28, 40, 12, 12, 33],
-        "C11": [13, 12, 30, 36, 20, 33, 14, 37, 13, 15, 14, 29, 19, 0, 25, 36, 12, 34, 27, 34, 14, 14, 31],
-        "C12": [39, 37, 12, 34, 16, 28, 30, 40, 19, 26, 21, 20, 17, 25, 0, 25, 40, 27, 15, 18, 26, 37, 29],
-        "C13": [22, 17, 29, 34, 30, 23, 15, 10, 23, 39, 34, 25, 11, 36, 25, 0, 23, 40, 16, 39, 27, 34, 33],
-        "C14": [12, 37, 30, 11, 25, 38, 35, 31, 15, 13, 15, 10, 17, 12, 40, 23, 0, 32, 16, 32, 19, 22, 31],
-        "C15": [27, 13, 15, 17, 22, 28, 31, 33, 24, 37, 27, 13, 38, 34, 27, 40, 32, 0, 30, 21, 24, 38, 26],
-        "C16": [19, 22, 27, 36, 38, 22, 23, 13, 10, 30, 40, 39, 28, 27, 15, 16, 16, 30, 0, 24, 13, 17, 17],
-        "C17": [36, 18, 33, 11, 39, 21, 29, 31, 40, 19, 34, 21, 40, 34, 18, 39, 32, 21, 24, 0, 12, 20, 10],
-        "C18": [30, 24, 17, 35, 30, 17, 12, 38, 33, 36, 39, 38, 12, 14, 26, 27, 19, 24, 13, 12, 0, 28, 27],
-        "C19": [29, 30, 15, 20, 24, 14, 22, 27, 38, 30, 26, 36, 12, 14, 37, 34, 22, 38, 17, 20, 28, 0, 17],
-        "C20": [38, 36, 24, 22, 14, 26, 22, 34, 33, 26, 39, 35, 33, 31, 29, 33, 31, 26, 17, 10, 27, 17, 0],
-    }
     coordinates = {
         **{f"W{i}": master_w[f"W{i}"] for i in range(1, num_w + 1)},
         **{f"D{i}": master_dc[f"DC{i}"] for i in range(1, num_dc + 1)},
         **{f"C{i}": master_cust[f"C{i}"] for i in range(1, num_cust + 1)},
     }
     distance_rows = {
-        row_node: [calculate_euclidean_distance(coordinates[row_node], coordinates[column_node]) for column_node in all_nodes]
+        row_node: [
+            0 if row_node == column_node else max(
+                1,
+                calculate_euclidean_distance(coordinates[row_node], coordinates[column_node]),
+            )
+            for column_node in all_nodes
+        ]
         for row_node in all_nodes
     }
     column_width = max(4, max(len(node) for node in all_nodes) + 1)
@@ -269,7 +264,12 @@ option B:0:0:1;
 Display Totaldemand, CPUTime.l, ElapsedTime.l, UsedTime.l;
 Display x.l, B.l, R.l, Q.l, Inv.l, perwarehouseqty, TravelCost.l, DriverHiringCost.l, DriversHired.l;
 """
-    return textwrap.dedent(gams_template).strip()
+    gams_code = textwrap.dedent(gams_template).strip()
+    if core_code is None:
+        return gams_code
+
+    data_preamble, _, _ = gams_code.partition("\nScalar NumOfCustomers;")
+    return f"{data_preamble}\n\n{core_code.strip()}"
 
 # ==========================================
 # 4. NEOS SERVER INTERFACE
@@ -353,6 +353,211 @@ if "generated_code" not in st.session_state:
 if "batch_models" not in st.session_state:
     st.session_state["batch_models"] = []
 
+JOURNAL_INEFFICIENT_CORRECTED_CORE = r"""*Scalar VehicleCapacity     /45/;
+Scalar NumOfCustomers;
+    NumOfCustomers = card(c);
+scalar perwarehouseqty;
+    perwarehouseqty= ceil(sum(c,E(c))-sum(d,I(d)))/card(w);
+    I(w)= perwarehouseqty;
+Variable z;
+
+
+Positive Variable
+    Qdel(p,n,c)      delivered quantity to customer c
+    Load(p,n,c)      load BEFORE serving customer c
+    Q                 quantity loaded from depot d
+    R(p,wd,wdp)      middle mile transfer quantity for period
+    Inv(p, d)        Inventory of Distribution center at period p
+    UsedTime(p,n)
+    TravelCost
+    DriverHiringCost
+    DriversHired
+    CPUTime, ElapsedTime
+
+;
+
+Binary Variable
+    x   True when there is a last mile transfer DC to Customers at period p with driver n
+    y(p,n)
+    h(n)
+    u(p,n,d)
+    B True when the middle mile transfer occurs
+;
+
+* Constraint Descriptions
+Equations
+C1              objective function
+
+C21             Each salesman can only have routing on a day if he is active that day
+C22             Each salesman must be hired if he performs any routing over the horizon
+
+C31             Each delivery point can have at most one incoming arc per day
+C41             Each customer must have exactly one outgoing arc per day
+
+C7              Flow conservation: inflow = outflow for each driver-day at each node
+C8              Working time limit per driver-day
+C9              Subtour elimination using MTZ ordering
+C10             Used time definition
+C11             Driver hiring cost definition
+
+NoDCtoDC        Salesman cannot travel from one DC to another DC
+StartDepotDef   Each active salesman selects exactly one DC per day
+DepartFromDepot Each salesman must depart from exactly one DC
+ReturnToDepot   Each salesman must return to the same DC
+
+MeetTotalDemand Total delivered quantity must equal customer demand
+LimitDelivery   Delivery allowed only if routing exists
+XzeroIfQtyzero  No routing if delivered quantity is zero
+
+*LoadCapUpper    Load before serving a customer cannot exceed vehicle capacity
+LoadMinDemand   Load before serving a customer must be ≥ delivered quantity
+LoadTransitionLB  Cumulative load consistency along the route lower bound
+LoadTransitionUB  Cumulative load consistency along the route Upper bound
+
+Q_Limit         Quantity loaded from DC allowed only if DC is selected
+Q_LoadBalance   Total delivered = total loaded from DC
+*DCInventory     DC inventory cannot be exceeded
+
+TravellingCostEq Travel cost definition
+NumDriversEq     Number of drivers hired
+BTrueWhenFlow
+NoSelfTravel
+
+*These four constraints added for multiperiod middle mile transfer
+*WarehouseInventoryP1 Initial inventory leads to Period 1 inventory
+*WarehouseInventoryAfter Inventory at p-1 leads to inventory therafter
+DCInventoryP1 Initial Inventory to Period 1 inventory
+DCInventoryAfter P-1 inventory to Subsequent inventory
+WarehouseTransfer Tranfers to dc from warehouse where inventory of WH is considered a very high number
+
+;
+
+* Model Constraints
+
+C1.. z =e= DriverHiringCost + TravelCost;
+
+C21(n,p).. sum((cd,cdp), x(p,n,cd,cdp)) =l= M*y(p,n);
+C22(n)..   sum((p,cd,cdp), x(p,n,cd,cdp)) =l= M*h(n);
+
+C31(p,cp).. sum((cd,n), x(p,n,cd,cp)) =l= 1;
+C41(p,c)..  sum((cdp,n), x(p,n,c,cdp)) =l= 1;
+
+C7(p,cd,n).. sum(cdp, x(p,n,cdp,cd)) =e= sum(cdp, x(p,n,cd,cdp));
+
+C8(p,n).. sum((cd,cdp),(S(cdp)+T(cd,cdp))*x(p,n,cd,cdp)) =l= WorkingTime;
+
+C9(p,n,c,cp).. ord(c)-ord(cp)+NumOfCustomers*x(p,n,c,cp) =l= NumOfCustomers-1;
+
+C10(p,n).. UsedTime(p,n) =e= sum((cd,cdp),(S(cdp)+T(cd,cdp))*x(p,n,cd,cdp));
+
+C11.. DriverHiringCost =e= sum((p,n),y(p,n))*DriverCostperPeriod;
+
+NoDCtoDC(p,n).. sum((d,dp), x(p,n,d,dp)) =e= 0;
+
+StartDepotDef(p,n).. sum(d, u(p,n,d)) =e= y(p,n);
+
+DepartFromDepot(p,n,d).. sum(cdp, x(p,n,d,cdp)) =e= u(p,n,d);
+
+ReturnToDepot(p,n,d).. sum(cdp, x(p,n,cdp,d)) =e= u(p,n,d);
+
+MeetTotalDemand(c).. sum((p,n), Qdel(p,n,c)) =e= E(c);
+*M below can be replaced by vehiclecapacity
+
+LimitDelivery(p,n,c).. Qdel(p,n,c) =l= M*sum(cd, x(p,n,cd,c));
+
+XzeroIfQtyzero(p,n,c).. sum(cd, x(p,n,cd,c)) =l= Qdel(p,n,c);
+
+LoadMinDemand(p,n,c).. Load(p,n,c) =g= Qdel(p,n,c);
+
+*M below (for both constraints) can be replaced by vehiclecapacity
+
+LoadTransitionLB(p,n,c,cp).. Load(p,n,cp) =g= Load(p,n,c) - Qdel(p,n,c)- M * (1 - x(p,n,c,cp));
+
+LoadTransitionUB(p,n,c,cp).. Load(p,n,cp) =l= Load(p,n,c) - Qdel(p,n,c)+ M * (1 - x(p,n,c,cp));
+
+*M below can be replaced by vehiclecapacity
+
+Q_Limit(p,n,d).. Q(p,n,d) =l= M* u(p,n,d);
+
+Q_LoadBalance(p,n).. sum(c, Qdel(p,n,c)) =e= sum(d, Q(p,n,d));
+
+*DCInventory(d)..  I(d)+ sum(w, R(w,d)) + sum(dp,R(dp,d)) -sum(dp,R(d,dp))- sum((p,n), Q(p,n,d)) =g= 0;
+
+*WarehouseInventory(w).. I(w) + sum(wp,R(wp,w))-sum(wp,R(w,wp))- sum(d,R(w,d)) =g= 0;
+
+BTrueWhenFlow(p, wd, wdp).. R(p, wd, wdp) =l= M * B(p, wd, wdp);
+
+* Constraints for multi-period middle mile tranfer starts from here
+*use these two warehouseInventory constraint if Inventory at warehouses considered finite.
+*WarehouseInventoryP1(p, w)$(ord(p) = 1).. Inv(p, w) =e= I(w) - sum(wdp, R(p, w, wdp));
+
+*WarehouseInventoryAfter(p, w)$(ord(p) > 1).. Inv(p, w) =e= Inv(p-1, w) + sum(wp, R(p-1, wp, w)) - sum(wdp, R(p, w, wdp));
+
+*This constraint used for infinite qty assumption in warehouses
+*WarehouseTransfer(p,w)..I(w) - sum(d,R(p,w,d)) =g= 0;
+
+WarehouseTransfer(w)..I(w) - sum((p,d),R(p,w,d)) =g= 0;
+
+DCInventoryP1(p,d)$(ord(p) = 1).. Inv(p, d) =e= I(d) - sum(dp, R(p, d, dp)) - sum(n, Q(p, n, d));
+
+DCInventoryAfter(p, d)$(ord(p) > 1).. Inv(p, d) =e= Inv(p-1, d)
+    + sum(wdp, R(p-1, wdp, d)) - sum(dp, R(p, d, dp)) - sum(n, Q(p, n, d));
+
+NoSelfTravel(p,wd,wd).. B(p,wd,wd)=e=0;
+
+TravellingCostEq.. TravelCost =e= sum((p,n,cd,cdp),TravelCostperTime * (S(cd)+T(cd,cdp)) * x(p,n,cd,cdp))
+                    + sum((p,wd,wdp),B(p,wd,wdp) *T(wd,wdp)*TravelCostperTime);
+
+NumDriversEq.. DriversHired =e= sum(n, h(n));
+
+Model MTSP /ALL/;
+Solve MTSP minimizing z using MIP;
+
+CPUTime.l     = MTSP.resusd;
+ElapsedTime.l = timeElapsed;
+
+option x:0:0:1;
+option Qdel:0:0:1;
+option Load:0:0:1;
+option Q:0:0:1;
+option R:0:0:1;
+option Inv:0:0:1;
+option B:0:0:1
+
+Display CPUTime.l, ElapsedTime.l, UsedTime.l;
+Display x.l, Qdel.l,B.l,R.l, Q.l,Inv.l,perwarehouseqty TravelCost.l, DriverHiringCost.l, DriversHired.l;"""
+
+BUILT_IN_GAMS_CORES = {
+    "Journal inefficient corrected": JOURNAL_INEFFICIENT_CORRECTED_CORE,
+}
+
+def select_gams_core(scope):
+    st.subheader("GAMS Optimization Core")
+    core_choice = st.radio(
+        "Core",
+        ["Efficiency Core", *BUILT_IN_GAMS_CORES, "Custom Core"],
+        horizontal=True,
+        key=f"{scope}_core_choice",
+    )
+    if core_choice == "Efficiency Core":
+        st.caption("Uses the current objectives, constraints, solve statement, and output displays.")
+        return core_choice, None
+    if core_choice in BUILT_IN_GAMS_CORES:
+        st.caption("Uses the selected built-in GAMS core after Scalar M.")
+        return core_choice, BUILT_IN_GAMS_CORES[core_choice]
+
+    core_name = st.text_input("Custom core name", value="Custom Core", key=f"{scope}_core_name")
+    core_code = st.text_area(
+        "Custom GAMS core",
+        height=340,
+        placeholder=(
+            "Enter the GAMS code that follows Scalar M, including declarations, "
+            "objectives, constraints, model/solve statements, and outputs."
+        ),
+        key=f"{scope}_core_code",
+    )
+    return core_name.strip() or "Custom Core", core_code.strip()
+
 st.title("📦 GAMS Code Generator & Automated NEOS Runner")
 st.markdown("Generate spatially consistent logistics network formulations backed by a **5 W / 15 DC / 300 Customer** benchmark coordinate grid.")
 
@@ -384,12 +589,17 @@ with tab_single:
     
     with col_ctrl:
         st.subheader("Model Synthesis")
+        single_core_name, single_core_code = select_gams_core("single")
         if st.button("Generate GAMS Code", type="primary", use_container_width=True):
-            st.session_state["generated_code"] = compile_gams_code(
-                s_num_w, s_num_dc, s_num_cust, s_num_periods, s_num_drivers,
-                s_dc_cost, s_trans_cost, s_warehouse_inventory, s_dc_inventory
-            )
-            st.success("GAMS model compiled using master benchmark spatial distances!")
+            if single_core_code == "":
+                st.error("Enter a custom GAMS core before generating the model.")
+            else:
+                st.session_state["generated_code"] = compile_gams_code(
+                    s_num_w, s_num_dc, s_num_cust, s_num_periods, s_num_drivers,
+                    s_dc_cost, s_trans_cost, s_warehouse_inventory, s_dc_inventory,
+                    single_core_code,
+                )
+                st.success(f"GAMS model compiled with the {single_core_name}!")
 
         st.divider()
         st.subheader("NEOS Direct Submit")
@@ -511,49 +721,57 @@ with tab_batch:
     
     with col_b2:
         sweep_drivers = get_batch_values("Drivers", 1, 20, s_num_drivers, "batch_drivers")
+        batch_core_name, batch_core_code = select_gams_core("batch")
 
     if st.button("Generate Batch Package (.zip)", type="primary"):
-        zip_buffer = io.BytesIO()
-        batch_count = 0
-        st.session_state["batch_models"] = []
-        
-        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-            for w_val in sweep_warehouses:
-                for dc_val in sweep_dcs:
-                    for c_val in sweep_customers:
-                        for p_val in sweep_periods:
-                            for d_val in sweep_drivers:
-                                batch_count += 1
-                                code_str = compile_gams_code(
-                                    w_val, dc_val, c_val, p_val, d_val,
-                                    s_dc_cost, s_trans_cost,
-                                    s_warehouse_inventory, s_dc_inventory
-                                )
-                                filename = f"{c_val}C-{dc_val}DC-{w_val}WH-{p_val}periods-{d_val}Drivers.GMS"
-                                if group_by == "Warehouses":
-                                    filename = f"{w_val}WH/{filename}"
-                                elif group_by == "Distribution centers":
-                                    filename = f"{dc_val}DC/{filename}"
-                                elif group_by == "Customers":
-                                    filename = f"{c_val}C/{filename}"
-                                elif group_by == "Planning periods":
-                                    filename = f"{p_val}periods/{filename}"
-                                elif group_by == "Drivers":
-                                    filename = f"{d_val}Drivers/{filename}"
-                                st.session_state["batch_models"].append({
-                                    "filename": filename,
-                                    "code": code_str,
-                                })
-                                zip_file.writestr(filename, code_str)
-        
-        zip_buffer.seek(0)
-        st.success(f"Generated {batch_count} GAMS script files maintaining spatial coordinate consistency!")
-        st.download_button(
-            label=f"💾 Download All {batch_count} GAMS Files (.zip)",
-            data=zip_buffer,
-            file_name="gams_batch_experiments.zip",
-            mime="application/zip"
-        )
+        if batch_core_code == "":
+            st.error("Enter a custom GAMS core before generating the batch package.")
+        else:
+            zip_buffer = io.BytesIO()
+            batch_count = 0
+            st.session_state["batch_models"] = []
+
+            with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+                for w_val in sweep_warehouses:
+                    for dc_val in sweep_dcs:
+                        for c_val in sweep_customers:
+                            for p_val in sweep_periods:
+                                for d_val in sweep_drivers:
+                                    batch_count += 1
+                                    code_str = compile_gams_code(
+                                        w_val, dc_val, c_val, p_val, d_val,
+                                        s_dc_cost, s_trans_cost,
+                                        s_warehouse_inventory, s_dc_inventory,
+                                        batch_core_code,
+                                    )
+                                    filename = f"{c_val}C-{dc_val}DC-{w_val}WH-{p_val}periods-{d_val}Drivers.GMS"
+                                    if group_by == "Warehouses":
+                                        filename = f"{w_val}WH/{filename}"
+                                    elif group_by == "Distribution centers":
+                                        filename = f"{dc_val}DC/{filename}"
+                                    elif group_by == "Customers":
+                                        filename = f"{c_val}C/{filename}"
+                                    elif group_by == "Planning periods":
+                                        filename = f"{p_val}periods/{filename}"
+                                    elif group_by == "Drivers":
+                                        filename = f"{d_val}Drivers/{filename}"
+                                    st.session_state["batch_models"].append({
+                                        "filename": filename,
+                                        "code": code_str,
+                                    })
+                                    zip_file.writestr(filename, code_str)
+
+            zip_buffer.seek(0)
+            st.success(
+                f"Generated {batch_count} GAMS script files with the {batch_core_name}, "
+                "maintaining spatial coordinate consistency!"
+            )
+            st.download_button(
+                label=f"💾 Download All {batch_count} GAMS Files (.zip)",
+                data=zip_buffer,
+                file_name="gams_batch_experiments.zip",
+                mime="application/zip"
+            )
 
     st.subheader("Submit Batch Files to NEOS")
     NEOS_FILES_PER_EMAIL = 15
