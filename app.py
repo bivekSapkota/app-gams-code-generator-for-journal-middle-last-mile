@@ -357,8 +357,8 @@ JOURNAL_INEFFICIENT_CORRECTED_CORE = r"""*Scalar VehicleCapacity     /45/;
 Scalar NumOfCustomers;
     NumOfCustomers = card(c);
 scalar perwarehouseqty;
-    perwarehouseqty= ceil(sum(c,E(c))-sum(d,I(d)))/card(w);
-    I(w)= perwarehouseqty;
+    perwarehouseqty = max(0, ceil(sum(c, E(c)) - sum(d, I(d))) / card(w));
+    I(w) = perwarehouseqty;
 Variable z;
 
 
