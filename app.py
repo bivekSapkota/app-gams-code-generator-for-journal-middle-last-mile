@@ -64,7 +64,8 @@ def compile_gams_code(
     num_periods,
     num_drivers,
     dc_cost,
-    trans_cost_per_unit,
+    trans_cost_lm,
+    trans_cost_mm,
     warehouse_inventory,
     dc_inventory,
     core_code=None,
@@ -158,7 +159,8 @@ Table T(wcd,wcdp)
 {distance_table_str}
 ;
 
-Scalar TravelCostperTime   /2/;
+Scalar TravelCostperTimeLM /{trans_cost_lm}/;
+Scalar TravelCostperTimeMM /{trans_cost_mm}/;
 Scalar DriverCostperPeriod /160/;
 Scalar WorkingTime         /480/;
 Scalar M                   /9999/;
@@ -246,7 +248,7 @@ WarehouseTransfer(w).. I(w) - sum((p,d),R(p,w,d)) =g= 0;
 DCInventoryP1(p,d)$(ord(p) = 1).. Inv(p, d) =e= I(d) - sum(dp, R(p, d, dp)) - sum(n, Q(p, n, d));
 DCInventoryAfter(p, d)$(ord(p) > 1).. Inv(p, d) =e= Inv(p-1, d) + sum(wdp, R(p-1, wdp, d)) - sum(dp, R(p, d, dp)) - sum(n, Q(p, n, d));
 NoSelfTravel(p,wd,wd).. B(p,wd,wd) =e= 0;
-TravellingCostEq.. TravelCost =e= sum((p,n,cd,cdp), TravelCostperTime * (S(cd)+T(cd,cdp)) * x(p,n,cd,cdp)) + sum((p,wd,wdp), B(p,wd,wdp) * T(wd,wdp) * TravelCostperTime);
+TravellingCostEq.. TravelCost =e= sum((p,n,cd,cdp), TravelCostperTimeLM * (S(cd)+T(cd,cdp)) * x(p,n,cd,cdp)) + sum((p,wd,wdp), B(p,wd,wdp) * T(wd,wdp) * TravelCostperTimeMM);
 NumDriversEq.. DriversHired =e= sum(n, h(n));
 
 Model MTSP /ALL/;
@@ -268,9 +270,22 @@ Display x.l, B.l, R.l, Q.l, Inv.l, perwarehouseqty, TravelCost.l, DriverHiringCo
     if core_code is None:
         return gams_code
 
+    core_code = core_code.replace(
+        "Scalar TravelCostperTimeLM   /2/;",
+        f"Scalar TravelCostperTimeLM   /{trans_cost_lm}/;",
+        1,
+    ).replace(
+        "Scalar TravelCostperTimeMM   /8/;",
+        f"Scalar TravelCostperTimeMM   /{trans_cost_mm}/;",
+        1,
+    )
     data_preamble, _, _ = gams_code.partition("\nScalar NumOfCustomers;")
     if "Scalar TravelCostperTimeLM" in core_code and "Scalar TravelCostperTimeMM" in core_code:
-        data_preamble = data_preamble.replace("Scalar TravelCostperTime   /2/;\n", "")
+        data_preamble = data_preamble.replace(
+            f"Scalar TravelCostperTimeLM /{trans_cost_lm}/;\n", ""
+        ).replace(
+            f"Scalar TravelCostperTimeMM /{trans_cost_mm}/;\n", ""
+        )
     return f"{data_preamble}\n\n{core_code.strip()}"
 
 # ==========================================
@@ -334,6 +349,12 @@ def get_neos_final_results(job_number, password):
         return results.data.decode('utf-8')
     except Exception as e:
         return f"Error retrieving output: {str(e)}"
+
+def visible_neos_output(log_text):
+    summary_marker = re.search(r"REPORT SUMMARY\s*:", log_text)
+    if summary_marker is None:
+        return log_text
+    return log_text[summary_marker.end():].lstrip()
 
 def download_text_automatically(filename, content):
     encoded_content = base64.b64encode(content.encode("utf-8")).decode("ascii")
@@ -598,7 +619,8 @@ s_num_drivers = st.sidebar.number_input("Driver Count", min_value=1, max_value=2
 
 st.sidebar.subheader("Cost Structure")
 s_dc_cost = st.sidebar.number_input("Driver Cost per Period ($)", value=160)
-s_trans_cost = st.sidebar.number_input("Travel Cost per Time", value=2, step=1)
+s_trans_cost_lm = st.sidebar.number_input("Last-mile Travel Cost per Time", min_value=0, value=2, step=1)
+s_trans_cost_mm = st.sidebar.number_input("Middle-mile Travel Cost per Time", min_value=0, value=8, step=1)
 
 st.sidebar.subheader("Inventory Settings")
 s_warehouse_inventory = st.sidebar.number_input("Warehouse Inventory", min_value=0, value=999, step=1)
@@ -622,7 +644,8 @@ with tab_single:
             else:
                 st.session_state["generated_code"] = compile_gams_code(
                     s_num_w, s_num_dc, s_num_cust, s_num_periods, s_num_drivers,
-                    s_dc_cost, s_trans_cost, s_warehouse_inventory, s_dc_inventory,
+                    s_dc_cost, s_trans_cost_lm, s_trans_cost_mm,
+                    s_warehouse_inventory, s_dc_inventory,
                     single_core_code,
                 )
                 st.success(f"GAMS model compiled with the {single_core_name}!")
@@ -766,7 +789,7 @@ with tab_batch:
                                     batch_count += 1
                                     code_str = compile_gams_code(
                                         w_val, dc_val, c_val, p_val, d_val,
-                                        s_dc_cost, s_trans_cost,
+                                        s_dc_cost, s_trans_cost_lm, s_trans_cost_mm,
                                         s_warehouse_inventory, s_dc_inventory,
                                         batch_core_code,
                                     )
@@ -949,7 +972,7 @@ with tab_neos:
                             st.caption("Fetching is disabled until Check Status reports Done.")
 
                     if job_id in job_logs:
-                        st.code(job_logs[job_id], language="text")
+                        st.code(visible_neos_output(job_logs[job_id]), language="text")
         else:
             st.warning("No Job ID and Password pairs were found in the uploaded text file.")
     
@@ -988,4 +1011,4 @@ with tab_neos:
                         st.caption("Fetching is disabled until Check Status reports Done.")
 
                 if job.get("log"):
-                    st.code(job["log"], language="text")
+                    st.code(visible_neos_output(job["log"]), language="text")
