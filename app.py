@@ -269,6 +269,8 @@ Display x.l, B.l, R.l, Q.l, Inv.l, perwarehouseqty, TravelCost.l, DriverHiringCo
         return gams_code
 
     data_preamble, _, _ = gams_code.partition("\nScalar NumOfCustomers;")
+    if "Scalar TravelCostperTimeLM" in core_code and "Scalar TravelCostperTimeMM" in core_code:
+        data_preamble = data_preamble.replace("Scalar TravelCostperTime   /2/;\n", "")
     return f"{data_preamble}\n\n{core_code.strip()}"
 
 # ==========================================
@@ -527,15 +529,39 @@ option B:0:0:1
 Display CPUTime.l, ElapsedTime.l, UsedTime.l;
 Display x.l, Qdel.l,B.l,R.l, Q.l,Inv.l,perwarehouseqty TravelCost.l, DriverHiringCost.l, DriversHired.l;"""
 
+JOURNAL_TRANSPORTATION_CORE = (
+    JOURNAL_INEFFICIENT_CORRECTED_CORE
+    .replace(
+        "Scalar NumOfCustomers;",
+        "Scalar TravelCostperTimeLM   /2/;\n"
+        "Scalar TravelCostperTimeMM   /8/;\n"
+        "Scalar NumOfCustomers;",
+        1,
+    )
+    .replace(
+        "TravelCostperTime * (S(cd)+T(cd,cdp))",
+        "TravelCostperTimeLM * (S(cd)+T(cd,cdp))",
+        1,
+    )
+    .replace(
+        "T(wd,wdp)*TravelCostperTime",
+        "T(wd,wdp)*TravelCostperTimeMM",
+        1,
+    )
+)
+
 BUILT_IN_GAMS_CORES = {
     "Journal inefficient corrected": JOURNAL_INEFFICIENT_CORRECTED_CORE,
+    "Journal Transportation": JOURNAL_TRANSPORTATION_CORE,
 }
 
 def select_gams_core(scope):
     st.subheader("GAMS Optimization Core")
+    core_options = ["Efficiency Core", *BUILT_IN_GAMS_CORES, "Custom Core"]
     core_choice = st.radio(
         "Core",
-        ["Efficiency Core", *BUILT_IN_GAMS_CORES, "Custom Core"],
+        core_options,
+        index=core_options.index("Journal Transportation"),
         horizontal=True,
         key=f"{scope}_core_choice",
     )
