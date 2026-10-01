@@ -571,9 +571,115 @@ JOURNAL_TRANSPORTATION_CORE = (
     )
 )
 
+JOURNAL_EFFICIENT_UNRESTRICTED_WAREHOUSE_CORE = r"""Scalar NumOfCustomers;
+    NumOfCustomers = card(c);
+
+Scalar TotalDemand;
+    TotalDemand = sum(c, E(c));
+
+
+Variable z;
+
+Positive Variable
+    Q(p,n,d)          quantity loaded from depot d
+    R(p,wd,wdp)       middle mile transfer quantity for period
+    Inv(p, wd)         Inventory of Distribution center at period p
+    UsedTime(p,n)
+    TravelCost
+    DriverHiringCost
+    DriversHired
+    CPUTime, ElapsedTime
+;
+
+Binary Variable
+    x                 True when there is a last mile transfer DC to Customers at period p with driver n
+    y(p,n)
+    h(n)
+    u(p,n,d)
+    B(p,wd,wdp)       True when the middle mile transfer occurs
+;
+
+Equations
+    mainObjective
+    RoutingIfActive
+    RoutingIfHired
+    SingleIncomingArc
+    SingleOutgoingArc
+    InflowEqualsOutflow
+    WorkTimeLimit
+    MTZConstraint
+    ServicePlusTravelTime
+    HiringCost
+    NoDCtoDC
+    StartDepotDef
+    DepartFromDepot
+    ReturnToDepot
+    Q_Limit
+    Q_LoadBalance
+    TravellingCostEq
+    NumDriversEq
+    BTrueWhenFlow
+    NoSelfTravel
+    onedeparture
+    onereturn
+*WarehouseTransfer
+    DCInventoryP1
+    DCInventoryAfter
+    WarehouseInventoryP1
+    WarehouseInventoryAfter
+    MaxDCTransfer
+;
+
+mainObjective.. z =e= DriverHiringCost + TravelCost;
+
+RoutingIfActive(n,p).. sum((cd,cdp), x(p,n,cd,cdp)) =l= M*y(p,n);
+RoutingIfHired(n).. sum((p,cd,cdp), x(p,n,cd,cdp)) =l= M*h(n);
+SingleIncomingArc(c).. sum((p,cd,n), x(p,n,cd,c)) =e= 1;
+SingleOutgoingArc(c).. sum((p,cdp,n), x(p,n,c,cdp)) =e= 1;
+onedeparture(p,n).. sum((cdp,d), x(p,n,d,cdp)) =e= y(p,n);
+onereturn(p,n).. sum((cdp,d), x(p,n,cdp,d)) =e= y(p,n);
+InflowEqualsOutflow(p, cd,n).. sum((cdp), x(p,n,cdp,cd)) =e= sum((cdp), x(p,n,cd,cdp));
+WorkTimeLimit(p,n).. sum((cd,cdp),(S(cdp)+T(cd,cdp))*x(p,n,cd,cdp)) =l= WorkingTime;
+MTZConstraint(p,n,c,cp).. ord(c)-ord(cp)+NumOfCustomers*x(p,n,c,cp) =l= NumOfCustomers-1;
+ServicePlusTravelTime(p,n).. UsedTime(p,n) =e= sum((cd,cdp),(S(cdp)+T(cd,cdp))*x(p,n,cd,cdp));
+HiringCost.. DriverHiringCost =e= sum((p,n),y(p,n))*DriverCostperPeriod;
+NoDCtoDC(p,n).. sum((d,dp), x(p,n,d,dp)) =e= 0;
+StartDepotDef(p,n).. sum(d, u(p,n,d)) =e= y(p,n);
+DepartFromDepot(p,n,d).. sum(cdp, x(p,n,d,cdp)) =e= u(p,n,d);
+ReturnToDepot(p,n,d).. sum(cdp, x(p,n,cdp,d)) =e= u(p,n,d);
+Q_Limit(p,n,d).. Q(p,n,d) =l= M*u(p,n,d);
+Q_LoadBalance.. sum(c, E(c)) =e= sum((p,n,d), Q(p,n,d));
+BTrueWhenFlow(p, wd, wdp).. R(p, wd, wdp) =l= M * B(p, wd, wdp);
+
+*use these two warehouseInventory constraint if Inventory at warehouses considered finite.
+WarehouseInventoryP1(p, w)$(ord(p) = 1).. Inv(p, w) =e= I(w) - sum(wdp, R(p, w, wdp));
+WarehouseInventoryAfter(p, w)$(ord(p) > 1).. Inv(p, w) =e= Inv(p-1, w) + sum(wp, R(p-1, wp, w)) - sum(wdp, R(p, w, wdp));
+DCInventoryP1(p,d)$(ord(p) = 1).. Inv(p, d) =e= I(d) - sum(dp, R(p, d, dp)) - sum(n, Q(p, n, d));
+DCInventoryAfter(p, d)$(ord(p) > 1).. Inv(p, d) =e= Inv(p-1, d) + sum(wdp, R(p-1, wdp, d)) - sum(dp, R(p, d, dp)) - sum(n, Q(p, n, d));
+MaxDCTransfer.. sum((p, w, wd), R(p, w, wd)) =l= TotalDemand;
+NoSelfTravel(p,wd,wd).. B(p,wd,wd) =e= 0;
+TravellingCostEq.. TravelCost =e= sum((p,n,cd,cdp), TravelCostperTimeLM * (S(cd)+T(cd,cdp)) * x(p,n,cd,cdp)) + sum((p,wd,wdp), B(p,wd,wdp) * T(wd,wdp) * TravelCostperTimeMM);
+NumDriversEq.. DriversHired =e= sum(n, h(n));
+
+Model MTSP /ALL/;
+Solve MTSP minimizing z using MIP;
+
+CPUTime.l     = MTSP.resusd;
+ElapsedTime.l = timeElapsed;
+
+option x:0:0:1;
+option Q:0:0:1;
+option R:0:0:1;
+option Inv:0:0:1;
+option B:0:0:1;
+
+Display Totaldemand, CPUTime.l, ElapsedTime.l, UsedTime.l;
+Display x.l, B.l, R.l, Q.l, Inv.l, TravelCost.l, DriverHiringCost.l, DriversHired.l;"""
+
 BUILT_IN_GAMS_CORES = {
     "Journal inefficient corrected": JOURNAL_INEFFICIENT_CORRECTED_CORE,
     "Journal Transportation": JOURNAL_TRANSPORTATION_CORE,
+    "Efficient multiperiod Unrestricted Warehouse": JOURNAL_EFFICIENT_UNRESTRICTED_WAREHOUSE_CORE,
 }
 
 def select_gams_core(scope):
@@ -793,7 +899,8 @@ with tab_batch:
                                         s_warehouse_inventory, s_dc_inventory,
                                         batch_core_code,
                                     )
-                                    filename = f"{c_val}C-{dc_val}DC-{w_val}WH-{p_val}periods-{d_val}Drivers.GMS"
+                                    core_suffix = re.sub(r"[^A-Za-z0-9]+", "", batch_core_name)
+                                    filename = f"{c_val}C-{dc_val}DC-{w_val}WH-{p_val}periods-{d_val}Drivers-{core_suffix}.GMS"
                                     if group_by == "Warehouses":
                                         filename = f"{w_val}WH/{filename}"
                                     elif group_by == "Distribution centers":
