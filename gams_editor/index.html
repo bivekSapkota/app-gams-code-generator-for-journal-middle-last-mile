@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; padding: 0; background: #1e1e1e; }
+  #editor, #fallback { width: 100%; border: 1px solid #3c3c3c; border-radius: 4px; box-sizing: border-box; }
+  #fallback { display: none; background: #1e1e1e; color: #d4d4d4; font: 13px Consolas, monospace; padding: 8px; resize: none; }
+</style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.32.9/ace.js"></script>
+</head>
+<body>
+<div id="editor"></div>
+<textarea id="fallback" spellcheck="false"></textarea>
+<script>
+  const send = (type, data) =>
+    window.parent.postMessage(Object.assign({ isStreamlitMessage: true, type: type }, data), "*");
+  let editor = null, lastSent = null, timer = null, currentValue = "", currentHeight = 500, currentTheme = "monokai";
+
+  function defineGamsMode() {
+    ace.define("ace/mode/gams_highlight_rules", ["require", "exports", "ace/lib/oop", "ace/mode/text_highlight_rules"], function (require, exports) {
+      const oop = require("ace/lib/oop");
+      const TextHighlightRules = require("ace/mode/text_highlight_rules").TextHighlightRules;
+      const GamsHighlightRules = function () {
+        const keywords = "sets?|parameters?|scalars?|variables?|positive|negative|binary|integer|free|equations?|model|models|solve|using|minimizing|maximizing|display|loop|for|while|if|else|elseif|option|options|alias|table|file|put|putclose|abort|execute|execute_load|execute_unload|and|or|not|xor|eq|ne|lt|le|gt|ge|by|all|yes|no|inf|eps|na|smax|smin|sum|prod|card|ord|sqr|sqrt|abs|max|min|exp|log|ln|power|round|floor|ceil|mod|sin|cos|uniform|normal";
+        this.$rules = {
+          start: [
+            { token: "comment.block", regex: "^\\$ontext\\b.*$", caseInsensitive: true, next: "blockcomment" },
+            { token: "comment", regex: "^\\*.*$" },
+            { token: "comment", regex: "!!.*$" },
+            { token: "keyword.control", regex: "^\\$\\w+" },
+            { token: "string", regex: "'[^']*'" },
+            { token: "string", regex: '"[^"]*"' },
+            { token: "constant.numeric", regex: "\\b\\d+(?:\\.\\d+)?(?:[eE][-+]?\\d+)?\\b" },
+            { token: "keyword", regex: "\\b(?:" + keywords + ")\\b", caseInsensitive: true },
+            { token: "keyword.operator", regex: "=[lgeEnN]=|=[xXbBcC]=|\\.\\.|\\+|-|\\*|/|=|<|>" },
+            { token: "paren.lparen", regex: "[\\[({]" },
+            { token: "paren.rparen", regex: "[\\])}]" },
+            { token: "text", regex: "\\s+" }
+          ],
+          blockcomment: [
+            { token: "comment.block", regex: "^\\$offtext\\b.*$", caseInsensitive: true, next: "start" },
+            { defaultToken: "comment.block" }
+          ]
+        };
+      };
+      oop.inherits(GamsHighlightRules, TextHighlightRules);
+      exports.GamsHighlightRules = GamsHighlightRules;
+    });
+    ace.define("ace/mode/gams", ["require", "exports", "ace/lib/oop", "ace/mode/text", "ace/mode/gams_highlight_rules"], function (require, exports) {
+      const oop = require("ace/lib/oop");
+      const TextMode = require("ace/mode/text").Mode;
+      const GamsHighlightRules = require("ace/mode/gams_highlight_rules").GamsHighlightRules;
+      const Mode = function () {
+        this.HighlightRules = GamsHighlightRules;
+        this.$behaviour = new (require("ace/mode/behaviour/cstyle").CstyleBehaviour)();
+      };
+      oop.inherits(Mode, TextMode);
+      (function () {
+        this.lineCommentStart = "*";
+        this.blockComment = { start: "$ontext", end: "$offtext" };
+        this.getNextLineIndent = function (state, line) {
+          return (line.match(/^\s*/) || [""])[0];
+        };
+        this.$id = "ace/mode/gams";
+      }).call(Mode.prototype);
+      exports.Mode = Mode;
+    });
+  }
+
+  function report(value) {
+    if (value === lastSent) return;
+    lastSent = value;
+    send("streamlit:setComponentValue", { value: value, dataType: "json" });
+  }
+
+  function onChange(getValue) {
+    clearTimeout(timer);
+    timer = setTimeout(() => report(getValue()), 400);
+  }
+
+  function setup(value, height) {
+    const box = document.getElementById("editor");
+    box.style.height = height + "px";
+    if (typeof ace === "undefined") {
+      box.style.display = "none";
+      const ta = document.getElementById("fallback");
+      ta.style.display = "block";
+      ta.style.height = height + "px";
+      ta.value = value;
+      ta.addEventListener("input", () => onChange(() => ta.value));
+      return;
+    }
+    defineGamsMode();
+    editor = ace.edit("editor");
+    editor.setTheme("ace/theme/" + currentTheme);
+    editor.session.setMode("ace/mode/gams");
+    editor.setOptions({
+      fontSize: "13px",
+      fontFamily: "Consolas, 'Courier New', monospace",
+      showPrintMargin: false,
+      highlightActiveLine: true,
+      tabSize: 4,
+      useSoftTabs: true,
+      wrap: false,
+      enableBasicAutocompletion: false
+    });
+    editor.setValue(value, -1);
+    editor.session.on("change", () => onChange(() => editor.getValue()));
+  }
+
+  window.addEventListener("message", (event) => {
+    if (event.data.type !== "streamlit:render") return;
+    const args = event.data.args || {};
+    const value = args.value || "";
+    const height = args.height || 500;
+    const theme = args.theme || "monokai";
+    if (theme !== currentTheme) {
+      currentTheme = theme;
+      if (editor) editor.setTheme("ace/theme/" + theme);
+    }
+    if (!editor && document.getElementById("fallback").style.display !== "block") {
+      currentHeight = height;
+      setup(value, height);
+      currentValue = value;
+      lastSent = value;
+    } else if (value !== currentValue && value !== lastSent) {
+      // The app supplied new code (e.g. after Generate); replace the editor contents.
+      currentValue = value;
+      lastSent = value;
+      if (editor) editor.setValue(value, -1);
+      else document.getElementById("fallback").value = value;
+    }
+    send("streamlit:setFrameHeight", { height: height + 4 });
+  });
+
+  send("streamlit:componentReady", { apiVersion: 1 });
+</script>
+</body>
+</html>

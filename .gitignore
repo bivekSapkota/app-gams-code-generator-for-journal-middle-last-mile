@@ -6,3 +6,4 @@ env/
 .streamlit/secrets.toml
 .DS_Store
 history.jsonl
+custom_cores.json

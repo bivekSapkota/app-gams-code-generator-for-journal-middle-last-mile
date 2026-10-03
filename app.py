@@ -11,6 +11,35 @@ import textwrap
 import xmlrpc.client
 import zipfile
 import streamlit as st
+import streamlit.components.v1 as components
+
+_gams_editor_component = components.declare_component(
+    "gams_editor", path=str(pathlib.Path(__file__).parent / "gams_editor")
+)
+
+
+IDE_THEMES = {
+    "Dark (Monokai)": "monokai",
+    "Dark (Dracula)": "dracula",
+    "Dark (One Dark)": "one_dark",
+    "Dark (Tomorrow Night)": "tomorrow_night",
+    "Dark (Solarized)": "solarized_dark",
+    "Colorful (Cobalt)": "cobalt",
+    "Colorful (Twilight)": "twilight",
+    "Light (GitHub)": "github",
+    "Light (Xcode)": "xcode",
+    "Light (Chrome)": "chrome",
+    "Light (Solarized)": "solarized_light",
+}
+
+
+def gams_editor(value, height=500, key=None):
+    """Ace-based editor with GAMS syntax highlighting; returns the current text."""
+    result = _gams_editor_component(
+        value=value, height=height, key=key, default=value,
+        theme=IDE_THEMES.get(st.session_state.get("ide_theme"), "monokai"),
+    )
+    return value if result is None else result
 
 # ==========================================
 # 1. PAGE CONFIG & STYLING
@@ -396,7 +425,7 @@ def confirm_terminate_dialog(jobs, label):
         if st.button("Cancel", key="kill_cancel", use_container_width=True):
             st.rerun()
 
-def render_bulk_neos_controls(jobs, logs, statuses, key_prefix):
+def render_bulk_neos_controls(jobs, logs, statuses, key_prefix, clear_jobs=None):
     """jobs: list of (filename, job_id, password); logs/statuses: dicts keyed by job_id, updated in place."""
     def is_done(job_id):
         return "done" in str(statuses.get(job_id) or "").lower()
@@ -415,7 +444,8 @@ def render_bulk_neos_controls(jobs, logs, statuses, key_prefix):
                     zf.writestr(safe_log_filename(f, j), logs[j])
         return buffer.getvalue()
 
-    col_check, col_zip, col_kill = st.columns(3)
+    columns = st.columns(4 if clear_jobs is not None else 3)
+    col_check, col_zip, col_kill = columns[:3]
     with col_check:
         if st.button("Check All Statuses", key=f"check_all_{key_prefix}", use_container_width=True):
             with st.spinner(f"Checking status for {len(jobs)} job(s)..."):
@@ -438,6 +468,17 @@ def render_bulk_neos_controls(jobs, logs, statuses, key_prefix):
     with col_kill:
         if st.button("Terminate All Jobs", key=f"kill_all_{key_prefix}", use_container_width=True):
             confirm_terminate_dialog(jobs, f"ALL {len(jobs)} job(s)")
+    if clear_jobs is not None:
+        with columns[3]:
+            if st.button(
+                "Clear All Jobs",
+                key=f"clear_all_{key_prefix}",
+                help="Remove all jobs from this view without terminating them or deleting history.",
+                use_container_width=True,
+            ):
+                clear_jobs.clear()
+                st.session_state["expanded_session_jobs"].clear()
+                st.rerun()
 
 # Plain-text JSON lines on disk (includes NEOS passwords); survives app restarts.
 HISTORY_FILE = pathlib.Path(__file__).with_name("history.jsonl")
@@ -457,6 +498,29 @@ def load_history():
         except json.JSONDecodeError:
             continue
     return entries
+
+def restore_history_job(history_entry):
+    job_id = history_entry.get("job_id")
+    password = history_entry.get("password")
+    if job_id is None or not password:
+        return False
+
+    jobs = st.session_state["neos_jobs"]
+    job = next((item for item in jobs if str(item["id"]) == str(job_id)), None)
+    if job is None:
+        job = {
+            "id": job_id,
+            "password": password,
+            "status": "Submitted",
+            "filename": history_entry.get("filename", "Unknown file"),
+            "code": "(restored from history)",
+        }
+        jobs.append(job)
+
+    if "expanded_session_jobs" not in st.session_state:
+        st.session_state["expanded_session_jobs"] = set()
+    st.session_state["expanded_session_jobs"].add(job["id"])
+    return True
 
 def base_params():
     return {
@@ -793,15 +857,34 @@ BUILT_IN_GAMS_CORES = {
     "Efficient multiperiod Unrestricted Warehouse": JOURNAL_EFFICIENT_UNRESTRICTED_WAREHOUSE_CORE,
 }
 
+CUSTOM_CORES_FILE = pathlib.Path(__file__).with_name("custom_cores.json")
+
+def load_custom_cores():
+    if not CUSTOM_CORES_FILE.exists():
+        return {}
+    try:
+        data = json.loads(CUSTOM_CORES_FILE.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    return {str(k): str(v) for k, v in data.items()} if isinstance(data, dict) else {}
+
+def save_custom_cores(cores):
+    CUSTOM_CORES_FILE.write_text(json.dumps(cores, indent=2), encoding="utf-8")
+
 def select_gams_core(scope):
     st.subheader("GAMS Optimization Core")
-    core_options = ["Efficiency Core", *BUILT_IN_GAMS_CORES, "Custom Core"]
+    custom_cores = load_custom_cores()
+    core_options = ["Efficiency Core", *BUILT_IN_GAMS_CORES, *custom_cores]
+    choice_key = f"{scope}_core_choice"
+    # A core deleted or renamed in the Cores tab must not linger as the selected value.
+    if st.session_state.get(choice_key) not in core_options:
+        st.session_state.pop(choice_key, None)
     core_choice = st.radio(
         "Core",
         core_options,
         index=core_options.index("Journal Transportation"),
         horizontal=True,
-        key=f"{scope}_core_choice",
+        key=choice_key,
     )
     if core_choice == "Efficiency Core":
         st.caption("Uses the current objectives, constraints, solve statement, and output displays.")
@@ -810,23 +893,16 @@ def select_gams_core(scope):
         st.caption("Uses the selected built-in GAMS core after Scalar M.")
         return core_choice, BUILT_IN_GAMS_CORES[core_choice]
 
-    core_name = st.text_input("Custom core name", value="Custom Core", key=f"{scope}_core_name")
-    core_code = st.text_area(
-        "Custom GAMS core",
-        height=340,
-        placeholder=(
-            "Enter the GAMS code that follows Scalar M, including declarations, "
-            "objectives, constraints, model/solve statements, and outputs."
-        ),
-        key=f"{scope}_core_code",
-    )
-    return core_name.strip() or "Custom Core", core_code.strip()
+    st.caption("Uses your saved custom core after Scalar M. Manage custom cores in the Cores tab.")
+    return core_choice, custom_cores[core_choice].strip()
 
 st.title("📦 GAMS Code Generator & Automated NEOS Runner")
 st.caption(f"Developed by Bivek Sapkota | © {datetime.date.today().year} Bivek Sapkota. All rights reserved.")
 st.markdown("Generate spatially consistent logistics network formulations backed by a **5 W / 15 DC / 300 Customer** benchmark coordinate grid.")
 
 # --- SIDEBAR CONFIGURATION ---
+st.sidebar.selectbox("🎨 Code editor theme", list(IDE_THEMES), key="ide_theme")
+
 st.sidebar.header("🕹️ Baseline Parameter Settings")
 
 s_num_w = st.sidebar.slider("Warehouses", 1, 5, 1)
@@ -845,8 +921,8 @@ s_warehouse_inventory = st.sidebar.number_input("Warehouse Inventory", min_value
 s_dc_inventory = st.sidebar.number_input("DC Inventory", min_value=0, value=80, step=1)
 
 # Main Application Tabs
-tab_single, tab_batch, tab_neos, tab_history = st.tabs(
-    ["📄 Single Model Generator", "📦 Batch Generator & Zip", "🚀 NEOS Job View", "🕘 History"]
+tab_single, tab_batch, tab_cores, tab_neos, tab_history = st.tabs(
+    ["📄 Single Model Generator", "📦 Batch Generator & Zip", "🧩 Cores", "🚀 NEOS Job View", "🕘 History"]
 )
 
 # ==========================================
@@ -869,6 +945,7 @@ with tab_single:
                     single_core_code,
                     single_core_name,
                 )
+                st.session_state["generated_core"] = single_core_name
                 st.success(f"GAMS model compiled with the {single_core_name}!")
                 record_history(
                     "generate_single",
@@ -894,6 +971,7 @@ with tab_single:
                 record_history(
                     "submit_single",
                     filename=single_filename,
+                    core=st.session_state.get("generated_core", ""),
                     email=user_email,
                     job_id=job_id,
                     password=pwd,
@@ -918,10 +996,11 @@ with tab_single:
     with col_main:
         st.subheader("Manual Code Editor & Viewer")
         if st.session_state["generated_code"]:
-            edited_code = st.text_area(
-                "Modify your GAMS model manually below:",
-                value=st.session_state["generated_code"],
-                height=520
+            st.caption("Modify your GAMS model manually below:")
+            edited_code = gams_editor(
+                st.session_state["generated_code"],
+                height=520,
+                key="single_code_editor",
             )
             st.session_state["generated_code"] = edited_code
             
@@ -1051,6 +1130,7 @@ with tab_batch:
                                     st.session_state["batch_models"].append({
                                         "filename": filename,
                                         "code": code_str,
+                                        "core": batch_core_name,
                                         "params": {
                                             "warehouses": w_val, "dcs": dc_val, "customers": c_val,
                                             "periods": p_val, "drivers": d_val, **base_params(),
@@ -1075,12 +1155,17 @@ with tab_batch:
                 f"Generated {batch_count} GAMS script files with the {batch_core_name}, "
                 "maintaining spatial coordinate consistency!"
             )
-            st.download_button(
-                label=f"💾 Download All {batch_count} GAMS Files (.zip)",
-                data=zip_buffer,
-                file_name="gams_batch_experiments.zip",
-                mime="application/zip"
-            )
+            st.session_state["batch_zip_bytes"] = zip_buffer.getvalue()
+            st.session_state["batch_zip_count"] = batch_count
+
+    if st.session_state.get("batch_zip_bytes"):
+        st.download_button(
+            label=f"💾 Download All {st.session_state['batch_zip_count']} GAMS Files (.zip)",
+            data=st.session_state["batch_zip_bytes"],
+            file_name="gams_batch_experiments.zip",
+            mime="application/zip",
+            key="batch_zip_download",
+        )
 
     st.subheader("Submit Batch Files to NEOS")
     NEOS_FILES_PER_EMAIL = 15
@@ -1094,9 +1179,11 @@ with tab_batch:
         step=1,
         key="batch_num_emails",
     )
+    # Pre-fill new email slots as researcher1@ndsu.edu, researcher2@ndsu.edu, ...
+    for i in range(int(num_emails)):
+        st.session_state.setdefault(f"batch_email_{i}", f"researcher{i + 1}@ndsu.edu")
     batch_emails = [
         st.text_input(f"NEOS email #{i + 1} (files {i * NEOS_FILES_PER_EMAIL + 1}-{(i + 1) * NEOS_FILES_PER_EMAIL})",
-                      value="researcher@ndsu.edu" if i == 0 else "",
                       key=f"batch_email_{i}")
         for i in range(int(num_emails))
     ]
@@ -1120,6 +1207,7 @@ with tab_batch:
                 record_history(
                     "submit_batch",
                     filename=batch_model["filename"],
+                    core=batch_model.get("core", ""),
                     email=submission_email,
                     job_id=job_id,
                     password=password,
@@ -1155,13 +1243,70 @@ with tab_batch:
             st.session_state["batch_credentials_report"] = credentials_report
             st.success("Batch files submitted to NEOS. Credentials report downloaded.")
             download_text_automatically("batch_neos_credentials.txt", credentials_report)
-            st.download_button(
-                "Download NEOS credentials report",
-                data=credentials_report,
-                file_name="batch_neos_credentials.txt",
-                mime="text/plain",
-                key="batch_credentials_download",
-            )
+
+    if st.session_state.get("batch_credentials_report"):
+        st.download_button(
+            "Download NEOS credentials report",
+            data=st.session_state["batch_credentials_report"],
+            file_name="batch_neos_credentials.txt",
+            mime="text/plain",
+            key="batch_credentials_download",
+        )
+
+# ==========================================
+# TAB: CORES (custom core management)
+# ==========================================
+with tab_cores:
+    st.subheader("Custom GAMS Cores")
+    st.caption(
+        f"Saved to {CUSTOM_CORES_FILE.name} next to app.py, so cores persist across restarts and are "
+        "available in the Single and Batch generators. A core is the GAMS code that follows Scalar M: "
+        "declarations, objectives, constraints, model/solve statements, and outputs."
+    )
+    NEW_CORE = "➕ New core"
+    saved_cores = load_custom_cores()
+    if "pending_core_select" in st.session_state:
+        st.session_state["core_manage_select"] = st.session_state.pop("pending_core_select")
+    if st.session_state.get("core_manage_select") not in [NEW_CORE, *saved_cores]:
+        st.session_state["core_manage_select"] = NEW_CORE
+    selected_core = st.selectbox("Core to view or edit", [NEW_CORE, *saved_cores], key="core_manage_select")
+    editing = selected_core != NEW_CORE
+    reserved_names = {"Efficiency Core", *BUILT_IN_GAMS_CORES}
+
+    new_core_name = st.text_input(
+        "Core name",
+        value=selected_core if editing else "",
+        key=f"core_name_{selected_core}",
+        placeholder="e.g. My Multiperiod Core",
+    )
+    new_core_code = gams_editor(
+        saved_cores.get(selected_core, ""), height=420, key=f"core_editor_{selected_core}"
+    )
+
+    col_save, col_delete, _ = st.columns([1, 1, 4])
+    if col_save.button("Save core", type="primary", use_container_width=True, key="core_save"):
+        name = new_core_name.strip()
+        code = new_core_code.strip()
+        if not name:
+            st.error("Enter a name for the core.")
+        elif name in reserved_names:
+            st.error(f'"{name}" is a built-in core name. Choose a different name.')
+        elif not code:
+            st.error("The core code is empty.")
+        elif name != selected_core and name in saved_cores:
+            st.error(f'A core named "{name}" already exists.')
+        else:
+            if editing and name != selected_core:
+                saved_cores.pop(selected_core, None)
+            saved_cores[name] = code
+            save_custom_cores(saved_cores)
+            st.session_state["pending_core_select"] = name
+            st.rerun()
+    if col_delete.button("Delete core", use_container_width=True, disabled=not editing, key="core_delete"):
+        saved_cores.pop(selected_core, None)
+        save_custom_cores(saved_cores)
+        st.session_state["pending_core_select"] = NEW_CORE
+        st.rerun()
 
 # ==========================================
 # TAB 3: NEOS JOB VIEW
@@ -1274,6 +1419,7 @@ with tab_neos:
             session_logs,
             session_statuses,
             "session",
+            clear_jobs=session_jobs,
         )
         for j in session_jobs:
             j["status"] = session_statuses.get(j["id"])
@@ -1281,13 +1427,27 @@ with tab_neos:
 
         for idx, job in enumerate(st.session_state["neos_jobs"]):
             job_filename = job.get("filename", "Unknown file")
-            col_exp, col_kill_btn = st.columns([6, 1])
+            col_exp, col_clear_btn, col_kill_btn = st.columns([5, 1, 1])
+            with col_clear_btn:
+                if st.button(
+                    "Clear",
+                    key=f"clear_session_{job['id']}",
+                    help="Remove this job from the view without terminating it or deleting history.",
+                    use_container_width=True,
+                ):
+                    st.session_state["neos_jobs"] = [
+                        item for item in st.session_state["neos_jobs"]
+                        if str(item["id"]) != str(job["id"])
+                    ]
+                    expanded_session_jobs.discard(job["id"])
+                    st.rerun()
             with col_kill_btn:
                 if st.button("Terminate", key=f"kill_session_{idx}", use_container_width=True):
                     confirm_terminate_dialog([(job_filename, job["id"], job["password"])], f"job #{job['id']}")
             with col_exp, st.expander(
-                f"{job_filename} | Job ID: {job['id']} (Password: {job['password']})",
-                expanded=idx in expanded_session_jobs,
+                f"{job_filename} | Job ID: {job['id']} (Password: {job['password']})"
+                + (f" | Status: {job['status']}" if job.get("status") else ""),
+                expanded=job["id"] in expanded_session_jobs,
             ):
                 col_st, col_act = st.columns([2, 1])
                 
@@ -1298,7 +1458,7 @@ with tab_neos:
                     if st.button(f"Check Status #{job['id']}", key=f"stat_{idx}"):
                         current_status = get_neos_status(job['id'], job['password'])
                         job['status'] = current_status
-                        expanded_session_jobs.add(idx)
+                        expanded_session_jobs.add(job["id"])
                         st.write(f"Current Status: **{current_status}**")
 
                     # getFinalResults blocks until the job finishes, so require a confirmed Done status first.
@@ -1306,7 +1466,7 @@ with tab_neos:
                         if st.button(f"Fetch Output Log #{job['id']}", key=f"res_{idx}"):
                             with st.spinner("Fetching output log from NEOS..."):
                                 job["log"] = get_neos_final_results(job['id'], job['password'])
-                            expanded_session_jobs.add(idx)
+                            expanded_session_jobs.add(job["id"])
                     else:
                         st.caption("Fetching is disabled until Check Status reports Done.")
 
@@ -1326,6 +1486,9 @@ with tab_neos:
 with tab_history:
     st.subheader("Activity History")
     st.caption(f"Saved to {HISTORY_FILE.name} next to app.py, so it persists across restarts. It contains NEOS passwords in plain text.")
+    history_message = st.session_state.pop("neos_history_message", None)
+    if history_message:
+        st.success(history_message)
     history = load_history()
     if not history:
         st.info("No activity recorded yet.")
@@ -1335,35 +1498,149 @@ with tab_history:
             sorted({h["event"] for h in history}),
             default=sorted({h["event"] for h in history}),
         )
-        rows = [
-            {
-                "time": h["time"],
-                "event": h["event"],
-                "file": h.get("filename", ""),
-                "core": h.get("core", ""),
-                "email": h.get("email", ""),
-                "job_id": h.get("job_id", ""),
-                "password": h.get("password", ""),
-                "result": h.get("error") or h.get("result") or "",
-                "options": json.dumps(h.get("params") or h.get("sweep") or ""),
-            }
-            for h in reversed(history)
-            if h["event"] in event_filter
-        ]
-        st.dataframe(rows, use_container_width=True, hide_index=True)
+        visible_history = [h for h in reversed(history) if h["event"] in event_filter]
 
-        known_ids = {j["id"] for j in st.session_state["neos_jobs"]}
-        restorable = [
-            h for h in history
-            if h["event"] in ("submit_single", "submit_batch") and h.get("job_id") and h["job_id"] not in known_ids
-        ]
+        # Terminate entries carry no password, so look it up from the matching submission.
+        job_passwords = {
+            str(h["job_id"]): h["password"]
+            for h in history
+            if h.get("job_id") is not None and h.get("password")
+        }
+
+        def format_params(params):
+            if not params:
+                return ""
+            if isinstance(params, dict):
+                return "{" + ", ".join(f"{k}: {v}" for k, v in params.items()) + "}"
+            return json.dumps(params)
+
+        # Terminate entries and older submissions lack a core, so use the submission's own core,
+        # falling back to the core of the most recent generate event before it.
+        job_cores = {}
+        last_generated_core = ""
+        for h in history:
+            if h["event"] in ("generate_single", "generate_batch"):
+                last_generated_core = h.get("core", "")
+            elif h["event"] in ("submit_single", "submit_batch") and h.get("job_id") is not None:
+                job_cores[str(h["job_id"])] = h.get("core") or last_generated_core
+
+        # Terminate entries carry no parameters, so reuse those of the matching submission.
+        job_params = {
+            str(h["job_id"]): h.get("params") or h.get("sweep")
+            for h in history
+            if h.get("job_id") is not None and (h.get("params") or h.get("sweep"))
+        }
+
+        st.markdown(
+            """<style>
+            [class*="st-key-history_job_"] button {
+                background-color: #1f9d3a; border-color: #1f9d3a; color: white;
+                min-height: 1.5rem; height: 1.5rem; padding: 0 0.5rem; white-space: nowrap;
+            }
+            [class*="st-key-history_job_"] button p { font-size: 0.7rem; line-height: 1; }
+            [class*="st-key-history_job_"] button:hover { background-color: #167a2c; border-color: #167a2c; color: white; }
+            [class*="st-key-history_table"] { overflow-x: auto; gap: 0; }
+            [class*="st-key-history_row_"], [class*="st-key-history_head"] {
+                border: 1px solid #e3e6ea; border-top: none; padding: 0; gap: 0; min-width: 1500px;
+            }
+            [class*="st-key-history_head"] { border-top: 1px solid #e3e6ea; background-color: #f4f6f8; }
+            [class*="st-key-history_row_"]:nth-of-type(even) { background-color: #fafbfc; }
+            [class*="st-key-history_row_"] [data-testid="stHorizontalBlock"],
+            [class*="st-key-history_head"] [data-testid="stHorizontalBlock"] {
+                gap: 0; align-items: stretch !important;
+            }
+            [class*="st-key-history_row_"] [data-testid="stColumn"],
+            [class*="st-key-history_head"] [data-testid="stColumn"] {
+                border-right: 1px solid #e3e6ea; padding: 6px 8px; min-width: 0; overflow-wrap: anywhere;
+                display: flex; flex-direction: column; justify-content: center;
+            }
+            [class*="st-key-history_row_"] [data-testid="stColumn"]:last-child,
+            [class*="st-key-history_head"] [data-testid="stColumn"]:last-child { border-right: none; }
+            [class*="st-key-history_row_"] [data-testid="stColumn"] > [data-testid="stVerticalBlock"],
+            [class*="st-key-history_head"] [data-testid="stColumn"] > [data-testid="stVerticalBlock"] {
+                flex: 0 0 auto; width: 100%; gap: 0; height: auto !important; min-height: fit-content;
+            }
+            [class*="st-key-history_row_"] [data-testid="stElementContainer"],
+            [class*="st-key-history_head"] [data-testid="stElementContainer"] {
+                height: auto !important; min-height: fit-content; flex-shrink: 0;
+            }
+            [class*="st-key-history_row_"] p, [class*="st-key-history_head"] p {
+                margin: 0; font-size: 0.72rem; line-height: 1.35; min-height: 0;
+            }
+            [class*="st-key-history_head"] p { font-weight: 600; }
+            [class*="st-key-history_row_"] [data-testid="stMarkdownContainer"],
+            [class*="st-key-history_head"] [data-testid="stMarkdownContainer"] { margin-bottom: 0 !important; }
+            [class*="st-key-history_row_"] [data-testid="stMarkdown"],
+            [class*="st-key-history_head"] [data-testid="stMarkdown"],
+            [class*="st-key-history_row_"] [data-testid="stMarkdown"] > div,
+            [class*="st-key-history_head"] [data-testid="stMarkdown"] > div { height: auto !important; min-height: fit-content; }
+            [class*="st-key-history_row_"] [data-testid="stElementContainer"],
+            [class*="st-key-history_head"] [data-testid="stElementContainer"] { width: 100%; }
+            </style>""",
+            unsafe_allow_html=True,
+        )
+        max_rows = st.number_input("Rows to show (most recent first)", min_value=10, max_value=2000, value=100, step=50)
+        st.caption("Click a green Job ID to load that job into the NEOS Job View.")
+
+        column_widths = [2, 1.5, 3, 2, 3, 2, 2.5, 3, 6]
+        with st.container(key="history_table"):
+            with st.container(key="history_head"):
+                header_cols = st.columns(column_widths)
+                titles = ["Time", "Event", "File", "Core", "Email", "Job ID", "Password", "Result", "Parameters"]
+                for col, title in zip(header_cols, titles):
+                    col.write(title)
+
+            for index, h in enumerate(visible_history[:int(max_rows)]):
+                with st.container(key=f"history_row_{index}"):
+                    cols = st.columns(column_widths)
+                    cols[0].write(h["time"])
+                    cols[1].write(h["event"])
+                    cols[2].write(h.get("filename", ""))
+                    cols[3].write(
+                        h.get("core") or (job_cores.get(str(h["job_id"]), "") if h.get("job_id") is not None else "")
+                    )
+                    cols[4].write(h.get("email", ""))
+                    job_id = h.get("job_id")
+                    password = h.get("password") or (job_passwords.get(str(job_id)) if job_id is not None else None)
+                    if job_id is not None and password:
+                        if cols[5].button(
+                            str(job_id),
+                            key=f"history_job_{index}",
+                            help=f"Load {h.get('filename') or 'this job'} into the NEOS Job View.",
+                            use_container_width=True,
+                        ):
+                            restore_history_job({**h, "password": password})
+                            st.session_state["neos_history_message"] = (
+                                f"Job #{job_id} is now available in the NEOS Job View."
+                            )
+                            st.rerun()
+                    else:
+                        cols[5].write(job_id if job_id is not None else "")
+                    cols[6].write(h.get("password", ""))
+                    cols[7].write(h.get("error") or h.get("result") or "")
+                    params = h.get("params") or h.get("sweep")
+                    if not params and job_id is not None:
+                        params = job_params.get(str(job_id))
+                    cols[8].write(format_params(params))
+
+        known_ids = {str(job["id"]) for job in st.session_state["neos_jobs"]}
+        restorable = []
+        seen_restorable_ids = set()
+        for entry in reversed(history):
+            job_id = entry.get("job_id")
+            if (
+                entry["event"] in ("submit_single", "submit_batch")
+                and job_id is not None
+                and entry.get("password")
+                and str(job_id) not in known_ids
+                and str(job_id) not in seen_restorable_ids
+            ):
+                restorable.append(entry)
+                seen_restorable_ids.add(str(job_id))
         if st.button(f"Load {len(restorable)} past job(s) into NEOS Job View", disabled=not restorable):
-            for h in restorable:
-                st.session_state["neos_jobs"].append({
-                    "id": h["job_id"],
-                    "password": h["password"],
-                    "status": "Submitted",
-                    "filename": h.get("filename", "Unknown file"),
-                    "code": "(restored from history)",
-                })
+            for entry in restorable:
+                restore_history_job(entry)
+            st.session_state["neos_history_message"] = (
+                f"Loaded {len(restorable)} past job(s) into the NEOS Job View."
+            )
             st.rerun()
