@@ -1,7 +1,10 @@
 import io
 import base64
 import concurrent.futures
+import datetime
+import json
 import math
+import pathlib
 import random
 import re
 import textwrap
@@ -69,6 +72,7 @@ def compile_gams_code(
     warehouse_inventory,
     dc_inventory,
     core_code=None,
+    core_name="Efficiency Core",
 ):
     master_w, master_dc, master_cust = generate_master_geometry()
     active_w = [f"W{i}" for i in range(1, num_w + 1)]
@@ -120,7 +124,7 @@ def compile_gams_code(
     dc_nodes = ", ".join(active_dc)
     warehouse_nodes = ", ".join(active_w)
 
-    gams_template = f"""$TITLE mTSP experimentation - Journal Instance W{num_w} D{num_dc} C{num_cust}
+    gams_template = f"""$TITLE {core_name} - Journal Instance W{num_w} D{num_dc} C{num_cust}
 $offlisting
 
 * Data: {num_cust} customers, {num_w} warehouse, {num_dc} DCs, {num_drivers} drivers, {num_periods} periods
@@ -355,6 +359,113 @@ def visible_neos_output(log_text):
     if summary_marker is None:
         return log_text
     return log_text[summary_marker.end():].lstrip()
+
+def kill_neos_job(job_number, password):
+    neos = get_neos_proxy(timeout=45)
+    try:
+        neos.killJob(job_number, password, "Terminated by user")
+        return "Termination requested"
+    except Exception as e:
+        return f"Error terminating job: {str(e)}"
+
+def safe_log_filename(filename, job_id):
+    base = re.sub(r"[^\w.\-]+", "_", str(filename)).rsplit(".", 1)[0] or "job"
+    return f"{base}_job{job_id}.log"
+
+@st.dialog("Confirm termination")
+def confirm_terminate_dialog(jobs, label):
+    """jobs: list of (filename, job_id, password)."""
+    st.warning(f"Are you sure you want to terminate {label} on the NEOS server? This cannot be undone.")
+    col_yes, col_no = st.columns(2)
+    with col_yes:
+        if st.button("Yes, terminate", key="kill_confirm", use_container_width=True):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
+                results = list(pool.map(lambda job: kill_neos_job(job[1], job[2]), jobs))
+            failed = [r for r in results if r.startswith("Error")]
+            for job, result in zip(jobs, results):
+                record_history("terminate", filename=job[0], job_id=job[1], password=job[2], result=result)
+            if failed:
+                st.session_state["neos_kill_message"] = (
+                    "warning",
+                    f"{len(jobs) - len(failed)} terminated; {len(failed)} failed (e.g. already finished). {failed[0]}",
+                )
+            else:
+                st.session_state["neos_kill_message"] = ("success", f"Termination requested for {len(jobs)} job(s).")
+            st.rerun()
+    with col_no:
+        if st.button("Cancel", key="kill_cancel", use_container_width=True):
+            st.rerun()
+
+def render_bulk_neos_controls(jobs, logs, statuses, key_prefix):
+    """jobs: list of (filename, job_id, password); logs/statuses: dicts keyed by job_id, updated in place."""
+    def is_done(job_id):
+        return "done" in str(statuses.get(job_id) or "").lower()
+
+    def build_zip():
+        # Fetch any Done logs not yet retrieved so one click yields every available log.
+        missing = [(j, p) for _, j, p in jobs if not logs.get(j) and is_done(j)]
+        if missing:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
+                for (j, _), text in zip(missing, pool.map(lambda m: get_neos_final_results(m[0], m[1]), missing)):
+                    logs[j] = text
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+            for f, j, _ in jobs:
+                if logs.get(j):
+                    zf.writestr(safe_log_filename(f, j), logs[j])
+        return buffer.getvalue()
+
+    col_check, col_zip, col_kill = st.columns(3)
+    with col_check:
+        if st.button("Check All Statuses", key=f"check_all_{key_prefix}", use_container_width=True):
+            with st.spinner(f"Checking status for {len(jobs)} job(s)..."):
+                with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
+                    futures = {pool.submit(get_neos_status, j, p): j for _, j, p in jobs}
+                    for future in concurrent.futures.as_completed(futures):
+                        statuses[futures[future]] = future.result()
+            st.success(f"Checked {len(jobs)} job(s).")
+    with col_zip:
+        st.download_button(
+            "Download All Logs (zip)",
+            data=build_zip,
+            file_name="neos_job_logs.zip",
+            mime="application/zip",
+            key=f"zip_all_{key_prefix}",
+            disabled=not any(logs.get(j) or is_done(j) for _, j, _ in jobs),
+            help="Enabled once a job is Done or has a fetched log.",
+            use_container_width=True,
+        )
+    with col_kill:
+        if st.button("Terminate All Jobs", key=f"kill_all_{key_prefix}", use_container_width=True):
+            confirm_terminate_dialog(jobs, f"ALL {len(jobs)} job(s)")
+
+# Plain-text JSON lines on disk (includes NEOS passwords); survives app restarts.
+HISTORY_FILE = pathlib.Path(__file__).with_name("history.jsonl")
+
+def record_history(event, **fields):
+    entry = {"time": datetime.datetime.now().isoformat(timespec="seconds"), "event": event, **fields}
+    with HISTORY_FILE.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(entry) + "\n")
+
+def load_history():
+    if not HISTORY_FILE.exists():
+        return []
+    entries = []
+    for line in HISTORY_FILE.read_text(encoding="utf-8").splitlines():
+        try:
+            entries.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return entries
+
+def base_params():
+    return {
+        "driver_cost": s_dc_cost,
+        "travel_cost_lm": s_trans_cost_lm,
+        "travel_cost_mm": s_trans_cost_mm,
+        "warehouse_inventory": s_warehouse_inventory,
+        "dc_inventory": s_dc_inventory,
+    }
 
 def download_text_automatically(filename, content):
     encoded_content = base64.b64encode(content.encode("utf-8")).decode("ascii")
@@ -712,6 +823,7 @@ def select_gams_core(scope):
     return core_name.strip() or "Custom Core", core_code.strip()
 
 st.title("📦 GAMS Code Generator & Automated NEOS Runner")
+st.caption(f"Developed by Bivek Sapkota | © {datetime.date.today().year} Bivek Sapkota. All rights reserved.")
 st.markdown("Generate spatially consistent logistics network formulations backed by a **5 W / 15 DC / 300 Customer** benchmark coordinate grid.")
 
 # --- SIDEBAR CONFIGURATION ---
@@ -733,7 +845,9 @@ s_warehouse_inventory = st.sidebar.number_input("Warehouse Inventory", min_value
 s_dc_inventory = st.sidebar.number_input("DC Inventory", min_value=0, value=80, step=1)
 
 # Main Application Tabs
-tab_single, tab_batch, tab_neos = st.tabs(["📄 Single Model Generator", "📦 Batch Generator & Zip", "🚀 NEOS Job View"])
+tab_single, tab_batch, tab_neos, tab_history = st.tabs(
+    ["📄 Single Model Generator", "📦 Batch Generator & Zip", "🚀 NEOS Job View", "🕘 History"]
+)
 
 # ==========================================
 # TAB 1: SINGLE MODEL GENERATION & MANUAL EDITOR
@@ -753,8 +867,17 @@ with tab_single:
                     s_dc_cost, s_trans_cost_lm, s_trans_cost_mm,
                     s_warehouse_inventory, s_dc_inventory,
                     single_core_code,
+                    single_core_name,
                 )
                 st.success(f"GAMS model compiled with the {single_core_name}!")
+                record_history(
+                    "generate_single",
+                    core=single_core_name,
+                    params={
+                        "warehouses": s_num_w, "dcs": s_num_dc, "customers": s_num_cust,
+                        "periods": s_num_periods, "drivers": s_num_drivers, **base_params(),
+                    },
+                )
 
         st.divider()
         st.subheader("NEOS Direct Submit")
@@ -767,6 +890,19 @@ with tab_single:
             else:
                 single_submit_status.info("Sending current GAMS file to NEOS CPLEX...")
                 job_id, pwd, msg = submit_to_neos(st.session_state["generated_code"], user_email)
+                single_filename = f"{s_num_cust}C-{s_num_dc}DC-{s_num_w}WH-{s_num_periods}periods-{s_num_drivers}Drivers.GMS"
+                record_history(
+                    "submit_single",
+                    filename=single_filename,
+                    email=user_email,
+                    job_id=job_id,
+                    password=pwd,
+                    error=None if job_id else msg,
+                    params={
+                        "warehouses": s_num_w, "dcs": s_num_dc, "customers": s_num_cust,
+                        "periods": s_num_periods, "drivers": s_num_drivers, **base_params(),
+                    },
+                )
                 if job_id:
                     st.session_state["neos_jobs"].append({
                         "id": job_id,
@@ -898,6 +1034,7 @@ with tab_batch:
                                         s_dc_cost, s_trans_cost_lm, s_trans_cost_mm,
                                         s_warehouse_inventory, s_dc_inventory,
                                         batch_core_code,
+                                        batch_core_name,
                                     )
                                     core_suffix = re.sub(r"[^A-Za-z0-9]+", "", batch_core_name)
                                     filename = f"{c_val}C-{dc_val}DC-{w_val}WH-{p_val}periods-{d_val}Drivers-{core_suffix}.GMS"
@@ -914,10 +1051,26 @@ with tab_batch:
                                     st.session_state["batch_models"].append({
                                         "filename": filename,
                                         "code": code_str,
+                                        "params": {
+                                            "warehouses": w_val, "dcs": dc_val, "customers": c_val,
+                                            "periods": p_val, "drivers": d_val, **base_params(),
+                                        },
                                     })
                                     zip_file.writestr(filename, code_str)
 
             zip_buffer.seek(0)
+            record_history(
+                "generate_batch",
+                core=batch_core_name,
+                file_count=batch_count,
+                group_by=group_by,
+                sweep={
+                    "warehouses": sweep_warehouses, "dcs": sweep_dcs, "customers": sweep_customers,
+                    "periods": sweep_periods, "drivers": sweep_drivers,
+                },
+                params=base_params(),
+                files=[m["filename"] for m in st.session_state["batch_models"]],
+            )
             st.success(
                 f"Generated {batch_count} GAMS script files with the {batch_core_name}, "
                 "maintaining spatial coordinate consistency!"
@@ -964,6 +1117,15 @@ with tab_batch:
                     f"Sending file {index + 1} of {len(batch_models)}: {batch_model['filename']}"
                 )
                 job_id, password, message = submit_to_neos(batch_model["code"], submission_email)
+                record_history(
+                    "submit_batch",
+                    filename=batch_model["filename"],
+                    email=submission_email,
+                    job_id=job_id,
+                    password=password,
+                    error=None if job_id else message,
+                    params=batch_model.get("params"),
+                )
                 if job_id:
                     st.session_state["neos_jobs"].append({
                         "id": job_id,
@@ -1008,6 +1170,18 @@ with tab_neos:
     st.subheader("NEOS Job View")
     st.caption(f"Submitted models use the CPLEX optimizer through {NEOS_ENDPOINT}.")
 
+    # Buttons keyed "kill_*" are styled red.
+    st.markdown(
+        """<style>
+        [class*="st-key-kill_"] button { background-color: #d32b2b; border-color: #d32b2b; color: white; }
+        [class*="st-key-kill_"] button:hover { background-color: #a82020; border-color: #a82020; color: white; }
+        </style>""",
+        unsafe_allow_html=True,
+    )
+    kill_message = st.session_state.pop("neos_kill_message", None)
+    if kill_message:
+        getattr(st, kill_message[0])(kill_message[1])
+
     uploaded_credentials = st.file_uploader(
         "Upload a NEOS credentials text file",
         type=["txt"],
@@ -1029,17 +1203,6 @@ with tab_neos:
                 st.session_state["uploaded_job_statuses"] = {}
             job_statuses = st.session_state["uploaded_job_statuses"]
 
-            if st.button("Check All Statuses", key="check_all_uploaded_statuses"):
-                with st.spinner(f"Checking status for {len(uploaded_jobs)} job(s)..."):
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
-                        futures = {
-                            pool.submit(get_neos_status, job_id, password): job_id
-                            for _, job_id, password in uploaded_jobs
-                        }
-                        for future in concurrent.futures.as_completed(futures):
-                            job_statuses[futures[future]] = future.result()
-                st.success(f"Checked {len(uploaded_jobs)} job(s).")
-
             if "uploaded_job_logs" not in st.session_state:
                 st.session_state["uploaded_job_logs"] = {}
             if "expanded_uploaded_jobs" not in st.session_state:
@@ -1047,9 +1210,15 @@ with tab_neos:
             job_logs = st.session_state["uploaded_job_logs"]
             expanded_uploaded_jobs = st.session_state["expanded_uploaded_jobs"]
 
+            render_bulk_neos_controls(uploaded_jobs, job_logs, job_statuses, "uploaded")
+
             for idx, (filename, job_id, password) in enumerate(uploaded_jobs):
                 cached_status = job_statuses.get(job_id)
-                with st.expander(
+                col_exp, col_kill_btn = st.columns([6, 1])
+                with col_kill_btn:
+                    if st.button("Terminate", key=f"kill_uploaded_{idx}", use_container_width=True):
+                        confirm_terminate_dialog([(filename, job_id, password)], f"job #{job_id}")
+                with col_exp, st.expander(
                     f"{filename} | Job ID: {job_id}" + (f" | {cached_status}" if cached_status else ""),
                     expanded=job_id in expanded_uploaded_jobs,
                 ):
@@ -1079,6 +1248,13 @@ with tab_neos:
                             st.caption("Fetching is disabled until Check Status reports Done.")
 
                     if job_id in job_logs:
+                        st.download_button(
+                            f"Download Log #{job_id}",
+                            data=job_logs[job_id],
+                            file_name=safe_log_filename(filename, job_id),
+                            mime="text/plain",
+                            key=f"uploaded_dl_{idx}",
+                        )
                         st.code(visible_neos_output(job_logs[job_id]), language="text")
         else:
             st.warning("No Job ID and Password pairs were found in the uploaded text file.")
@@ -1090,9 +1266,26 @@ with tab_neos:
             st.session_state["expanded_session_jobs"] = set()
         expanded_session_jobs = st.session_state["expanded_session_jobs"]
 
+        session_jobs = st.session_state["neos_jobs"]
+        session_statuses = {j["id"]: j.get("status") for j in session_jobs}
+        session_logs = {j["id"]: j.get("log") for j in session_jobs}
+        render_bulk_neos_controls(
+            [(j.get("filename", "job"), j["id"], j["password"]) for j in session_jobs],
+            session_logs,
+            session_statuses,
+            "session",
+        )
+        for j in session_jobs:
+            j["status"] = session_statuses.get(j["id"])
+            j["log"] = session_logs.get(j["id"])
+
         for idx, job in enumerate(st.session_state["neos_jobs"]):
             job_filename = job.get("filename", "Unknown file")
-            with st.expander(
+            col_exp, col_kill_btn = st.columns([6, 1])
+            with col_kill_btn:
+                if st.button("Terminate", key=f"kill_session_{idx}", use_container_width=True):
+                    confirm_terminate_dialog([(job_filename, job["id"], job["password"])], f"job #{job['id']}")
+            with col_exp, st.expander(
                 f"{job_filename} | Job ID: {job['id']} (Password: {job['password']})",
                 expanded=idx in expanded_session_jobs,
             ):
@@ -1118,4 +1311,59 @@ with tab_neos:
                         st.caption("Fetching is disabled until Check Status reports Done.")
 
                 if job.get("log"):
+                    st.download_button(
+                        f"Download Log #{job['id']}",
+                        data=job["log"],
+                        file_name=safe_log_filename(job_filename, job['id']),
+                        mime="text/plain",
+                        key=f"dl_{idx}",
+                    )
                     st.code(visible_neos_output(job["log"]), language="text")
+
+# ==========================================
+# TAB 4: PERSISTENT HISTORY
+# ==========================================
+with tab_history:
+    st.subheader("Activity History")
+    st.caption(f"Saved to {HISTORY_FILE.name} next to app.py, so it persists across restarts. It contains NEOS passwords in plain text.")
+    history = load_history()
+    if not history:
+        st.info("No activity recorded yet.")
+    else:
+        event_filter = st.multiselect(
+            "Show events",
+            sorted({h["event"] for h in history}),
+            default=sorted({h["event"] for h in history}),
+        )
+        rows = [
+            {
+                "time": h["time"],
+                "event": h["event"],
+                "file": h.get("filename", ""),
+                "core": h.get("core", ""),
+                "email": h.get("email", ""),
+                "job_id": h.get("job_id", ""),
+                "password": h.get("password", ""),
+                "result": h.get("error") or h.get("result") or "",
+                "options": json.dumps(h.get("params") or h.get("sweep") or ""),
+            }
+            for h in reversed(history)
+            if h["event"] in event_filter
+        ]
+        st.dataframe(rows, use_container_width=True, hide_index=True)
+
+        known_ids = {j["id"] for j in st.session_state["neos_jobs"]}
+        restorable = [
+            h for h in history
+            if h["event"] in ("submit_single", "submit_batch") and h.get("job_id") and h["job_id"] not in known_ids
+        ]
+        if st.button(f"Load {len(restorable)} past job(s) into NEOS Job View", disabled=not restorable):
+            for h in restorable:
+                st.session_state["neos_jobs"].append({
+                    "id": h["job_id"],
+                    "password": h["password"],
+                    "status": "Submitted",
+                    "filename": h.get("filename", "Unknown file"),
+                    "code": "(restored from history)",
+                })
+            st.rerun()
