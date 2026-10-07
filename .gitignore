@@ -7,3 +7,4 @@ env/
 .DS_Store
 history.jsonl
 custom_cores.json
+custom_data_profiles.json

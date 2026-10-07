@@ -86,6 +86,24 @@ def generate_master_geometry():
 def calculate_euclidean_distance(p1, p2):
     return int(round(math.sqrt((p1[0] - p2[0])**2 + (p1[1] - p2[1])**2)))
 
+
+def generate_custom_data_values(all_nodes, active_dc, active_cust, data_profile):
+    table_rng = random.Random(42)
+    service_rng = random.Random(42)
+    distance_rows = {node: [0] * len(all_nodes) for node in all_nodes}
+    for row_index, row_node in enumerate(all_nodes):
+        for column_index in range(row_index + 1, len(all_nodes)):
+            column_node = all_nodes[column_index]
+            value = table_rng.randint(data_profile["table_min"], data_profile["table_max"])
+            distance_rows[row_node][column_index] = value
+            distance_rows[column_node][row_index] = value
+    service_values = {
+        node: service_rng.randint(data_profile["service_min"], data_profile["service_max"])
+        for node in active_dc + active_cust
+    }
+    return distance_rows, service_values
+
+
 # ==========================================
 # 3. GAMS CODE COMPILER ENGINE
 # ==========================================
@@ -102,6 +120,7 @@ def compile_gams_code(
     dc_inventory,
     core_code=None,
     core_name="Efficiency Core",
+    data_profile=None,
 ):
     master_w, master_dc, master_cust = generate_master_geometry()
     active_w = [f"W{i}" for i in range(1, num_w + 1)]
@@ -110,26 +129,32 @@ def compile_gams_code(
     all_nodes = active_w + active_dc + active_cust
     drivers = " ".join(f"n{i}" for i in range(1, num_drivers + 1))
     periods = " ".join(f"p{i}" for i in range(1, num_periods + 1))
-    service_values = {node: 32 for node in active_dc}
     demand_seed = random.Random(101)
-    service_seed = random.Random(202)
     demand_values = {customer: demand_seed.randint(10, 35) for customer in active_cust}
-    service_values.update({customer: service_seed.randint(10, 45) for customer in active_cust})
+    if data_profile is None:
+        service_values = {node: 32 for node in active_dc}
+        service_seed = random.Random(202)
+        service_values.update({customer: service_seed.randint(10, 45) for customer in active_cust})
+    else:
+        distance_rows, service_values = generate_custom_data_values(
+            all_nodes, active_dc, active_cust, data_profile
+        )
     coordinates = {
         **{f"W{i}": master_w[f"W{i}"] for i in range(1, num_w + 1)},
         **{f"D{i}": master_dc[f"DC{i}"] for i in range(1, num_dc + 1)},
         **{f"C{i}": master_cust[f"C{i}"] for i in range(1, num_cust + 1)},
     }
-    distance_rows = {
-        row_node: [
-            0 if row_node == column_node else max(
-                1,
-                calculate_euclidean_distance(coordinates[row_node], coordinates[column_node]),
-            )
-            for column_node in all_nodes
-        ]
-        for row_node in all_nodes
-    }
+    if data_profile is None:
+        distance_rows = {
+            row_node: [
+                0 if row_node == column_node else max(
+                    1,
+                    calculate_euclidean_distance(coordinates[row_node], coordinates[column_node]),
+                )
+                for column_node in all_nodes
+            ]
+            for row_node in all_nodes
+        }
     column_width = max(4, max(len(node) for node in all_nodes) + 1)
     table_header = " " * 5 + " ".join(f"{node:>{column_width}}" for node in all_nodes)
     table_rows = [
@@ -858,6 +883,58 @@ BUILT_IN_GAMS_CORES = {
 }
 
 CUSTOM_CORES_FILE = pathlib.Path(__file__).with_name("custom_cores.json")
+CUSTOM_DATA_PROFILES_FILE = pathlib.Path(__file__).with_name("custom_data_profiles.json")
+DEFAULT_DATA_PROFILE = "Default"
+NEW_DATA_PROFILE = "➕ New data profile"
+
+
+def validate_data_profile(profile):
+    if not isinstance(profile, dict):
+        raise ValueError("profile values must be an object")
+
+    values = {}
+    for key in ("table_min", "table_max", "service_min", "service_max"):
+        value = profile.get(key)
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise ValueError(f"{key} must be an integer")
+        values[key] = value
+
+    if values["table_min"] < 1 or values["table_min"] > values["table_max"]:
+        raise ValueError("table range must satisfy 1 <= minimum <= maximum")
+    if values["service_min"] < 1 or values["service_min"] > values["service_max"]:
+        raise ValueError("service-duration range must satisfy 1 <= minimum <= maximum")
+    if values["table_max"] > 10000 or values["service_max"] > 10000:
+        raise ValueError("range maximums cannot exceed 10000")
+    return values
+
+
+def load_custom_data_profiles():
+    if not CUSTOM_DATA_PROFILES_FILE.exists():
+        return {}
+    try:
+        data = json.loads(CUSTOM_DATA_PROFILES_FILE.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        st.error(f"Could not read saved data profiles in {CUSTOM_DATA_PROFILES_FILE.name}: {error}")
+        return {}
+    if not isinstance(data, dict):
+        st.error(f"Saved data profiles in {CUSTOM_DATA_PROFILES_FILE.name} must be a JSON object.")
+        return {}
+
+    profiles = {}
+    for name, profile in data.items():
+        profile_name = str(name)
+        if profile_name == DEFAULT_DATA_PROFILE:
+            st.error(f'"{DEFAULT_DATA_PROFILE}" is reserved for the built-in data profile.')
+            continue
+        try:
+            profiles[profile_name] = validate_data_profile(profile)
+        except ValueError as error:
+            st.error(f'Ignoring invalid data profile "{name}": {error}.')
+    return profiles
+
+
+def save_custom_data_profiles(profiles):
+    CUSTOM_DATA_PROFILES_FILE.write_text(json.dumps(profiles, indent=2), encoding="utf-8")
 
 def load_custom_cores():
     if not CUSTOM_CORES_FILE.exists():
@@ -896,6 +973,19 @@ def select_gams_core(scope):
     st.caption("Uses your saved custom core after Scalar M. Manage custom cores in the Cores tab.")
     return core_choice, custom_cores[core_choice].strip()
 
+
+def select_data_profile(scope, custom_profiles):
+    options = [DEFAULT_DATA_PROFILE, *custom_profiles]
+    choice_key = f"{scope}_data_profile_choice"
+    if st.session_state.get(choice_key) not in options:
+        st.session_state.pop(choice_key, None)
+    selected = st.selectbox("Data profile", options, key=choice_key)
+    if selected == DEFAULT_DATA_PROFILE:
+        st.caption("Uses the existing geometry-based table and current demand/service data.")
+        return selected, None
+    st.caption("Uses the saved random table and service-duration ranges (seed 42).")
+    return selected, custom_profiles[selected]
+
 st.title("📦 GAMS Code Generator & Automated NEOS Runner")
 st.caption(f"Developed by Bivek Sapkota | © {datetime.date.today().year} Bivek Sapkota. All rights reserved.")
 st.markdown("Generate spatially consistent logistics network formulations backed by a **5 W / 15 DC / 300 Customer** benchmark coordinate grid.")
@@ -920,9 +1010,11 @@ st.sidebar.subheader("Inventory Settings")
 s_warehouse_inventory = st.sidebar.number_input("Warehouse Inventory", min_value=0, value=999, step=1)
 s_dc_inventory = st.sidebar.number_input("DC Inventory", min_value=0, value=80, step=1)
 
+custom_data_profiles = load_custom_data_profiles()
+
 # Main Application Tabs
-tab_single, tab_batch, tab_cores, tab_neos, tab_history = st.tabs(
-    ["📄 Single Model Generator", "📦 Batch Generator & Zip", "🧩 Cores", "🚀 NEOS Job View", "🕘 History"]
+tab_single, tab_batch, tab_cores, tab_data, tab_neos, tab_history = st.tabs(
+    ["📄 Single Model Generator", "📦 Batch Generator & Zip", "🧩 Cores", "📊 Data", "🚀 NEOS Job View", "🕘 History"]
 )
 
 # ==========================================
@@ -934,6 +1026,9 @@ with tab_single:
     with col_ctrl:
         st.subheader("Model Synthesis")
         single_core_name, single_core_code = select_gams_core("single")
+        single_data_profile_name, single_data_profile = select_data_profile(
+            "single", custom_data_profiles
+        )
         if st.button("Generate GAMS Code", type="primary", use_container_width=True):
             if single_core_code == "":
                 st.error("Enter a custom GAMS core before generating the model.")
@@ -944,12 +1039,15 @@ with tab_single:
                     s_warehouse_inventory, s_dc_inventory,
                     single_core_code,
                     single_core_name,
+                    data_profile=single_data_profile,
                 )
                 st.session_state["generated_core"] = single_core_name
+                st.session_state["generated_data_profile"] = single_data_profile_name
                 st.success(f"GAMS model compiled with the {single_core_name}!")
                 record_history(
                     "generate_single",
                     core=single_core_name,
+                    data_profile=single_data_profile_name,
                     params={
                         "warehouses": s_num_w, "dcs": s_num_dc, "customers": s_num_cust,
                         "periods": s_num_periods, "drivers": s_num_drivers, **base_params(),
@@ -972,6 +1070,7 @@ with tab_single:
                     "submit_single",
                     filename=single_filename,
                     core=st.session_state.get("generated_core", ""),
+                    data_profile=st.session_state.get("generated_data_profile", DEFAULT_DATA_PROFILE),
                     email=user_email,
                     job_id=job_id,
                     password=pwd,
@@ -1092,6 +1191,9 @@ with tab_batch:
     with col_b2:
         sweep_drivers = get_batch_values("Drivers", 1, 20, s_num_drivers, "batch_drivers")
         batch_core_name, batch_core_code = select_gams_core("batch")
+        batch_data_profile_name, batch_data_profile = select_data_profile(
+            "batch", custom_data_profiles
+        )
 
     if st.button("Generate Batch Package (.zip)", type="primary"):
         if batch_core_code == "":
@@ -1114,6 +1216,7 @@ with tab_batch:
                                         s_warehouse_inventory, s_dc_inventory,
                                         batch_core_code,
                                         batch_core_name,
+                                        data_profile=batch_data_profile,
                                     )
                                     core_suffix = re.sub(r"[^A-Za-z0-9]+", "", batch_core_name)
                                     filename = f"{c_val}C-{dc_val}DC-{w_val}WH-{p_val}periods-{d_val}Drivers-{core_suffix}.GMS"
@@ -1131,6 +1234,7 @@ with tab_batch:
                                         "filename": filename,
                                         "code": code_str,
                                         "core": batch_core_name,
+                                        "data_profile": batch_data_profile_name,
                                         "params": {
                                             "warehouses": w_val, "dcs": dc_val, "customers": c_val,
                                             "periods": p_val, "drivers": d_val, **base_params(),
@@ -1142,6 +1246,7 @@ with tab_batch:
             record_history(
                 "generate_batch",
                 core=batch_core_name,
+                data_profile=batch_data_profile_name,
                 file_count=batch_count,
                 group_by=group_by,
                 sweep={
@@ -1208,6 +1313,7 @@ with tab_batch:
                     "submit_batch",
                     filename=batch_model["filename"],
                     core=batch_model.get("core", ""),
+                    data_profile=batch_model.get("data_profile", DEFAULT_DATA_PROFILE),
                     email=submission_email,
                     job_id=job_id,
                     password=password,
@@ -1306,6 +1412,117 @@ with tab_cores:
         saved_cores.pop(selected_core, None)
         save_custom_cores(saved_cores)
         st.session_state["pending_core_select"] = NEW_CORE
+        st.rerun()
+
+# ==========================================
+# TAB: DATA (custom generated data profiles)
+# ==========================================
+with tab_data:
+    st.subheader("Generated Data Profiles")
+    st.caption(
+        f"Saved to {CUSTOM_DATA_PROFILES_FILE.name} next to app.py. The built-in Default profile "
+        "preserves the existing geometry-based travel-time table and demand/service values. "
+        "Custom profiles generate a symmetric table with zero diagonal and random service durations, "
+        "reproducible with seed 42."
+    )
+
+    if "pending_data_profile_select" in st.session_state:
+        st.session_state["data_profile_manage_select"] = st.session_state.pop(
+            "pending_data_profile_select"
+        )
+    if st.session_state.get("data_profile_manage_select") not in [
+        NEW_DATA_PROFILE, *custom_data_profiles
+    ]:
+        st.session_state["data_profile_manage_select"] = NEW_DATA_PROFILE
+
+    selected_data_profile = st.selectbox(
+        "Data profile to view or edit",
+        [NEW_DATA_PROFILE, *custom_data_profiles],
+        key="data_profile_manage_select",
+    )
+    editing_data_profile = selected_data_profile != NEW_DATA_PROFILE
+    profile_defaults = custom_data_profiles.get(
+        selected_data_profile,
+        {"table_min": 1, "table_max": 25, "service_min": 10, "service_max": 45},
+    )
+    data_profile_name = st.text_input(
+        "Profile name",
+        value=selected_data_profile if editing_data_profile else "",
+        key=f"data_profile_name_{selected_data_profile}",
+        placeholder="e.g. Short travel times",
+    )
+
+    table_col, service_col = st.columns(2)
+    with table_col:
+        st.markdown("**Travel-time table (T)**")
+        st.caption("Custom values are symmetric; self-travel entries stay 0.")
+        table_min, table_max = st.columns(2)
+        with table_min:
+            table_min_value = st.number_input(
+                "Minimum table value", min_value=1, max_value=10000,
+                value=profile_defaults["table_min"], step=1,
+                key=f"data_table_min_{selected_data_profile}",
+            )
+        with table_max:
+            table_max_value = st.number_input(
+                "Maximum table value", min_value=1, max_value=10000,
+                value=profile_defaults["table_max"], step=1,
+                key=f"data_table_max_{selected_data_profile}",
+            )
+    with service_col:
+        st.markdown("**Service duration (S)**")
+        service_min, service_max = st.columns(2)
+        with service_min:
+            service_min_value = st.number_input(
+                "Minimum service duration", min_value=1, max_value=10000,
+                value=profile_defaults["service_min"], step=1,
+                key=f"data_service_min_{selected_data_profile}",
+            )
+        with service_max:
+            service_max_value = st.number_input(
+                "Maximum service duration", min_value=1, max_value=10000,
+                value=profile_defaults["service_max"], step=1,
+                key=f"data_service_max_{selected_data_profile}",
+            )
+
+    col_save_data, col_delete_data, _ = st.columns([1, 1, 4])
+    if col_save_data.button(
+        "Save data profile", type="primary", use_container_width=True, key="data_profile_save"
+    ):
+        name = data_profile_name.strip()
+        profile_values = {
+            "table_min": int(table_min_value),
+            "table_max": int(table_max_value),
+            "service_min": int(service_min_value),
+            "service_max": int(service_max_value),
+        }
+        if not name:
+            st.error("Enter a name for the data profile.")
+        elif name == DEFAULT_DATA_PROFILE:
+            st.error(f'"{DEFAULT_DATA_PROFILE}" is reserved for the existing default data.')
+        elif name == NEW_DATA_PROFILE:
+            st.error("Choose a different name for the data profile.")
+        elif name != selected_data_profile and name in custom_data_profiles:
+            st.error(f'A data profile named "{name}" already exists.')
+        else:
+            try:
+                profile_values = validate_data_profile(profile_values)
+            except ValueError as error:
+                st.error(str(error))
+            else:
+                if editing_data_profile and name != selected_data_profile:
+                    custom_data_profiles.pop(selected_data_profile, None)
+                custom_data_profiles[name] = profile_values
+                save_custom_data_profiles(custom_data_profiles)
+                st.session_state["pending_data_profile_select"] = name
+                st.rerun()
+    if col_delete_data.button(
+        "Delete data profile", use_container_width=True,
+        disabled=not editing_data_profile, key="data_profile_delete",
+    ):
+        custom_data_profiles.pop(selected_data_profile, None)
+        save_custom_data_profiles(custom_data_profiles)
+        st.session_state["pending_data_profile_select"] = NEW_DATA_PROFILE
         st.rerun()
 
 # ==========================================
