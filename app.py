@@ -87,20 +87,48 @@ def calculate_euclidean_distance(p1, p2):
     return int(round(math.sqrt((p1[0] - p2[0])**2 + (p1[1] - p2[1])**2)))
 
 
-def generate_custom_data_values(all_nodes, active_dc, active_cust, data_profile):
+CUSTOM_DATA_MASTER_NODES = (
+    [f"W{i}" for i in range(1, 6)]
+    + [f"D{i}" for i in range(1, 16)]
+    + [f"C{i}" for i in range(1, 301)]
+)
+
+
+@st.cache_data
+def generate_custom_data_master_values(table_min, table_max, service_min, service_max):
     table_rng = random.Random(42)
+    distance_matrix = [[0] * len(CUSTOM_DATA_MASTER_NODES) for _ in CUSTOM_DATA_MASTER_NODES]
+    for row_index in range(len(CUSTOM_DATA_MASTER_NODES)):
+        for column_index in range(row_index + 1, len(CUSTOM_DATA_MASTER_NODES)):
+            value = table_rng.randint(table_min, table_max)
+            distance_matrix[row_index][column_index] = value
+            distance_matrix[column_index][row_index] = value
+
     service_rng = random.Random(42)
-    distance_rows = {node: [0] * len(all_nodes) for node in all_nodes}
-    for row_index, row_node in enumerate(all_nodes):
-        for column_index in range(row_index + 1, len(all_nodes)):
-            column_node = all_nodes[column_index]
-            value = table_rng.randint(data_profile["table_min"], data_profile["table_max"])
-            distance_rows[row_node][column_index] = value
-            distance_rows[column_node][row_index] = value
     service_values = {
-        node: service_rng.randint(data_profile["service_min"], data_profile["service_max"])
-        for node in active_dc + active_cust
+        node: service_rng.randint(service_min, service_max)
+        for node in CUSTOM_DATA_MASTER_NODES[5:]
     }
+    return tuple(tuple(row) for row in distance_matrix), service_values
+
+
+def generate_custom_data_values(all_nodes, active_dc, active_cust, data_profile):
+    master_indices = {node: index for index, node in enumerate(CUSTOM_DATA_MASTER_NODES)}
+    master_distances, master_services = generate_custom_data_master_values(
+        data_profile["table_min"],
+        data_profile["table_max"],
+        data_profile["service_min"],
+        data_profile["service_max"],
+    )
+    node_indices = [master_indices[node] for node in all_nodes]
+    distance_rows = {
+        row_node: [
+            master_distances[master_indices[row_node]][column_index]
+            for column_index in node_indices
+        ]
+        for row_node in all_nodes
+    }
+    service_values = {node: master_services[node] for node in active_dc + active_cust}
     return distance_rows, service_values
 
 
@@ -121,6 +149,8 @@ def compile_gams_code(
     core_code=None,
     core_name="Efficiency Core",
     data_profile=None,
+    service_time_addition=0,
+    travel_time_addition=0,
 ):
     master_w, master_dc, master_cust = generate_master_geometry()
     active_w = [f"W{i}" for i in range(1, num_w + 1)]
@@ -152,6 +182,19 @@ def compile_gams_code(
                     calculate_euclidean_distance(coordinates[row_node], coordinates[column_node]),
                 )
                 for column_node in all_nodes
+            ]
+            for row_node in all_nodes
+        }
+    if service_time_addition:
+        service_values = {
+            node: value + service_time_addition
+            for node, value in service_values.items()
+        }
+    if travel_time_addition:
+        distance_rows = {
+            row_node: [
+                0 if row_node == column_node else value + travel_time_addition
+                for column_node, value in zip(all_nodes, distance_rows[row_node])
             ]
             for row_node in all_nodes
         }
@@ -1195,6 +1238,43 @@ with tab_batch:
             "batch", custom_data_profiles
         )
 
+    st.subheader("Service-time iteration")
+    enable_service_iterations = st.checkbox(
+        "Enable service-time iterations",
+        value=False,
+        key="batch_enable_service_iterations",
+        help="When disabled, the batch generator produces one unchanged file per parameter combination.",
+    )
+    iteration_col, count_col, travel_col = st.columns(3)
+    with iteration_col:
+        batch_add_unit = st.number_input(
+            "Value to add in each iteration",
+            min_value=1,
+            max_value=10000,
+            value=1,
+            step=1,
+            key="batch_service_add_unit",
+            disabled=not enable_service_iterations,
+        )
+    with count_col:
+        batch_iteration_count = st.number_input(
+            "Number of iterations",
+            min_value=1,
+            max_value=1000,
+            value=1,
+            step=1,
+            key="batch_iteration_count",
+            disabled=not enable_service_iterations,
+        )
+    with travel_col:
+        add_to_travel_time = st.checkbox(
+            "Also add increment to travel-time table",
+            value=False,
+            key="batch_add_to_travel_time",
+            disabled=not enable_service_iterations,
+            help="Adds the same cumulative increment to every non-diagonal travel-time value.",
+        )
+
     if st.button("Generate Batch Package (.zip)", type="primary"):
         if batch_core_code == "":
             st.error("Enter a custom GAMS core before generating the batch package.")
@@ -1209,38 +1289,61 @@ with tab_batch:
                         for c_val in sweep_customers:
                             for p_val in sweep_periods:
                                 for d_val in sweep_drivers:
-                                    batch_count += 1
-                                    code_str = compile_gams_code(
-                                        w_val, dc_val, c_val, p_val, d_val,
-                                        s_dc_cost, s_trans_cost_lm, s_trans_cost_mm,
-                                        s_warehouse_inventory, s_dc_inventory,
-                                        batch_core_code,
-                                        batch_core_name,
-                                        data_profile=batch_data_profile,
+                                    iterations = (
+                                        range(1, int(batch_iteration_count) + 1)
+                                        if enable_service_iterations else [0]
                                     )
-                                    core_suffix = re.sub(r"[^A-Za-z0-9]+", "", batch_core_name)
-                                    filename = f"{c_val}C-{dc_val}DC-{w_val}WH-{p_val}periods-{d_val}Drivers-{core_suffix}.GMS"
-                                    if group_by == "Warehouses":
-                                        filename = f"{w_val}WH/{filename}"
-                                    elif group_by == "Distribution centers":
-                                        filename = f"{dc_val}DC/{filename}"
-                                    elif group_by == "Customers":
-                                        filename = f"{c_val}C/{filename}"
-                                    elif group_by == "Planning periods":
-                                        filename = f"{p_val}periods/{filename}"
-                                    elif group_by == "Drivers":
-                                        filename = f"{d_val}Drivers/{filename}"
-                                    st.session_state["batch_models"].append({
-                                        "filename": filename,
-                                        "code": code_str,
-                                        "core": batch_core_name,
-                                        "data_profile": batch_data_profile_name,
-                                        "params": {
-                                            "warehouses": w_val, "dcs": dc_val, "customers": c_val,
-                                            "periods": p_val, "drivers": d_val, **base_params(),
-                                        },
-                                    })
-                                    zip_file.writestr(filename, code_str)
+                                    for iteration in iterations:
+                                        batch_count += 1
+                                        cumulative_addition = iteration * int(batch_add_unit)
+                                        code_str = compile_gams_code(
+                                            w_val, dc_val, c_val, p_val, d_val,
+                                            s_dc_cost, s_trans_cost_lm, s_trans_cost_mm,
+                                            s_warehouse_inventory, s_dc_inventory,
+                                            batch_core_code,
+                                            batch_core_name,
+                                            data_profile=batch_data_profile,
+                                            service_time_addition=cumulative_addition,
+                                            travel_time_addition=(
+                                                cumulative_addition if add_to_travel_time else 0
+                                            ),
+                                        )
+                                        core_suffix = re.sub(r"[^A-Za-z0-9]+", "", batch_core_name)
+                                        iteration_suffix = (
+                                            f"-DataIter{iteration}-Add{cumulative_addition}"
+                                            if enable_service_iterations else ""
+                                        )
+                                        filename = (
+                                            f"{c_val}C-{dc_val}DC-{w_val}WH-{p_val}periods-"
+                                            f"{d_val}Drivers-{core_suffix}{iteration_suffix}.GMS"
+                                        )
+                                        if group_by == "Warehouses":
+                                            filename = f"{w_val}WH/{filename}"
+                                        elif group_by == "Distribution centers":
+                                            filename = f"{dc_val}DC/{filename}"
+                                        elif group_by == "Customers":
+                                            filename = f"{c_val}C/{filename}"
+                                        elif group_by == "Planning periods":
+                                            filename = f"{p_val}periods/{filename}"
+                                        elif group_by == "Drivers":
+                                            filename = f"{d_val}Drivers/{filename}"
+                                        st.session_state["batch_models"].append({
+                                            "filename": filename,
+                                            "code": code_str,
+                                            "core": batch_core_name,
+                                            "data_profile": batch_data_profile_name,
+                                            "params": {
+                                                "warehouses": w_val, "dcs": dc_val, "customers": c_val,
+                                                "periods": p_val, "drivers": d_val,
+                                                "data_iteration": iteration if enable_service_iterations else None,
+                                                "service_time_addition": cumulative_addition,
+                                                "travel_time_addition": (
+                                                    cumulative_addition if add_to_travel_time else 0
+                                                ),
+                                                **base_params(),
+                                            },
+                                        })
+                                        zip_file.writestr(filename, code_str)
 
             zip_buffer.seek(0)
             record_history(
@@ -1248,6 +1351,12 @@ with tab_batch:
                 core=batch_core_name,
                 data_profile=batch_data_profile_name,
                 file_count=batch_count,
+                service_time_iterations_enabled=enable_service_iterations,
+                service_time_add_unit=int(batch_add_unit),
+                iteration_count=(
+                    int(batch_iteration_count) if enable_service_iterations else 0
+                ),
+                add_to_travel_time=add_to_travel_time,
                 group_by=group_by,
                 sweep={
                     "warehouses": sweep_warehouses, "dcs": sweep_dcs, "customers": sweep_customers,
