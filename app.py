@@ -198,8 +198,9 @@ def compile_gams_code(
             ]
             for row_node in all_nodes
         }
-    column_width = max(4, max(len(node) for node in all_nodes) + 1)
-    table_header = " " * 5 + " ".join(f"{node:>{column_width}}" for node in all_nodes)
+    max_value_len = max(len(str(v)) for row in distance_rows.values() for v in row)
+    column_width = max(4, max(len(node) for node in all_nodes) + 1, max_value_len + 1)
+    table_header = " " * (column_width + 1) + " ".join(f"{node:>{column_width}}" for node in all_nodes)
     table_rows = [
         f"{row_node:>{column_width}} " + " ".join(f"{distance:>{column_width}}" for distance in distance_rows[row_node])
         for row_node in all_nodes
