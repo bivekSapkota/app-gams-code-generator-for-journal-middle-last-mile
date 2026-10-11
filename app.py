@@ -50,6 +50,24 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+st.markdown(
+    """<style>
+    @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700&display=swap');
+    html, body, [data-testid="stAppViewContainer"], [data-testid="stSidebar"] {
+        font-family: "Montserrat", Arial, sans-serif;
+    }
+    [data-testid="stAppViewContainer"] h1 {
+        font-family: "Montserrat", Arial, sans-serif;
+        padding-bottom: 0.35rem;
+        border-bottom: 4px solid #FFC425;
+    }
+    [data-testid="stSidebar"] {
+        border-right: 1px solid #A0BD78;
+    }
+    </style>""",
+    unsafe_allow_html=True,
+)
+
 # ==========================================
 # 2. MASTER GEOMETRY GENERATOR (SINGLE SOURCE OF TRUTH)
 # ==========================================
@@ -1861,11 +1879,11 @@ with tab_history:
         st.markdown(
             """<style>
             [class*="st-key-history_job_"] button {
-                background-color: #1f9d3a; border-color: #1f9d3a; color: white;
+                background-color: #00583D; border-color: #00583D; color: white;
                 min-height: 1.5rem; height: 1.5rem; padding: 0 0.5rem; white-space: nowrap;
             }
             [class*="st-key-history_job_"] button p { font-size: 0.7rem; line-height: 1; }
-            [class*="st-key-history_job_"] button:hover { background-color: #167a2c; border-color: #167a2c; color: white; }
+            [class*="st-key-history_job_"] button:hover { background-color: #003524; border-color: #003524; color: white; }
             [class*="st-key-history_table"] { overflow-x: auto; gap: 0; }
             [class*="st-key-history_row_"], [class*="st-key-history_head"] {
                 border: 1px solid #e3e6ea; border-top: none; padding: 0; gap: 0; min-width: 1500px;

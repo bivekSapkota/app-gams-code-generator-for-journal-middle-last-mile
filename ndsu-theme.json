@@ -1,0 +1,132 @@
+{
+  "name": "NDSU Green and Gold",
+  "description": "Reusable color and typography theme based on the NDSU Brand Guidelines.",
+  "source": {
+    "document": "NDSU Brand Guidelines",
+    "edition": "October 2026",
+    "primary_colors_page": 22,
+    "expanded_palette_page": 23,
+    "typography_page": 20
+  },
+  "colors": {
+    "brand": {
+      "green": {
+        "name": "NDSU Green",
+        "hex": "#00583D",
+        "rgb": [0, 88, 61],
+        "cmyk": [98, 0, 72, 61],
+        "pantone": "343 C",
+        "role": "primary"
+      },
+      "yellow": {
+        "name": "NDSU Yellow",
+        "hex": "#FFC425",
+        "rgb": [255, 196, 37],
+        "cmyk": [0, 24, 94, 0],
+        "pantone": "123 C",
+        "role": "primary"
+      }
+    },
+    "secondary": {
+      "evergreen": {
+        "name": "Evergreen",
+        "hex": "#003524",
+        "rgb": [0, 53, 36],
+        "cmyk": [92, 35, 76, 71],
+        "pantone": "5605 C"
+      },
+      "prairie_grass": {
+        "name": "Prairie Grass",
+        "hex": "#A0BD78",
+        "rgb": [160, 189, 120],
+        "cmyk": [30, 0, 60, 15],
+        "pantone": "4205 C"
+      },
+      "prairie_mist": {
+        "name": "Prairie Mist",
+        "hex": "#D7E5C8",
+        "rgb": [215, 229, 200],
+        "cmyk": [16, 2, 25, 0],
+        "pantone": "7485 C"
+      },
+      "sunflower": {
+        "name": "Sunflower",
+        "hex": "#FDE051",
+        "rgb": [253, 224, 81],
+        "cmyk": [2, 8, 80, 0],
+        "pantone": "115"
+      },
+      "sunlit": {
+        "name": "Sunlit",
+        "hex": "#FDE983",
+        "rgb": [253, 233, 131],
+        "cmyk": [2, 4, 60, 0],
+        "pantone": null
+      }
+    },
+    "accent": {
+      "trailblazer": {
+        "name": "Trailblazer",
+        "hex": "#D9DA55",
+        "rgb": [217, 218, 85],
+        "cmyk": [12, 0, 79, 6],
+        "pantone": "584"
+      },
+      "marquee": {
+        "name": "Marquee",
+        "hex": "#51ABA0",
+        "rgb": [81, 171, 160],
+        "cmyk": [60, 0, 35, 15],
+        "pantone": "2401"
+      },
+      "morning_frost": {
+        "name": "Morning Frost",
+        "hex": "#D8E9E8",
+        "rgb": [216, 233, 232],
+        "cmyk": [11, 0, 5, 3],
+        "pantone": "585"
+      },
+      "terra": {
+        "name": "Terra",
+        "hex": "#BE5E27",
+        "rgb": [190, 94, 39],
+        "cmyk": [19, 73, 100, 8],
+        "pantone": "159"
+      }
+    },
+    "ui": {
+      "background": "#FFFFFF",
+      "surface": "#D7E5C8",
+      "text": "#1F2A24",
+      "primary_action": "#00583D",
+      "primary_action_hover": "#003524",
+      "focus_or_highlight": "#FFC425"
+    }
+  },
+  "typography": {
+    "primary": {
+      "name": "Gotham",
+      "google_font_alternative": "Montserrat",
+      "usage": ["headlines", "subheads", "body"]
+    },
+    "secondary": {
+      "name": "Adobe Garamond Pro",
+      "google_font_alternative": "EB Garamond",
+      "usage": ["formal_or_traditional_headlines", "subheads", "body"]
+    },
+    "web_fallbacks": ["Arial", "sans-serif"]
+  },
+  "usage": {
+    "primary_colors_should_be_most_prominent": true,
+    "secondary_colors_guideline": "In most cases, limit to about 25% of a design; use to complement, not replace, primary colors.",
+    "accent_colors_guideline": "Use sparingly for infographics, alerts, and calls to action; limit to about 10% of a design.",
+    "avoid_school_associated_combinations": [
+      ["black", "green", "white"],
+      ["black", "red"],
+      ["maroon", "gold"],
+      ["blue", "yellow"]
+    ],
+    "logo": "Do not recreate or alter NDSU logos. Users outside NDSU should request permission before use.",
+    "graphic_elements": "Use as secondary/background elements or accents; limit to one graphic element per design."
+  }
+}
